@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="گوش مصنوعی">
+<meta name="theme-color" content="#2563eb">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="style.css">
+<title>گوش مصنوعی</title>
+</head>
+<body>
+<header>
+  <h1>گوش مصنوعی</h1>
+  <span class="badge" id="conn">…</span>
+</header>
+<main>
+  <section class="view" id="v-home">
+    <div class="card"><h3 id="greet">سلام!</h3><div class="muted" id="homeinfo"></div></div>
+    <div id="due"></div>
+    <div id="cards"></div>
+  </section>
+
+  <section class="view" id="v-chat">
+    <div id="modebar">
+      <span id="brainbadge" class="pill">مغز: آنلاین</span>
+      <span style="flex:1"></span>
+      <button id="newchat" class="btn2 sm">گفتگوی جدید</button>
+    </div>
+    <div id="log"></div>
+    <div id="bar">
+      <textarea id="t" rows="1" placeholder="پیام…"></textarea>
+      <button id="attach" title="فایل">📎</button>
+      <button id="mic" title="صحبت">🎤</button>
+      <button id="send">ارسال</button>
+    </div>
+  </section>
+
+  <section class="view" id="v-agents">
+    <div class="card"><h3>عامل جدید</h3>
+      <div class="muted">عامل یک دستور ذخیره‌شده است که دستیار با ابزارها (ویکی‌پدیا، آب‌وهوا، جستجو، اخبار، یادداشت‌ها…) اجرا می‌کند؛ می‌تواند روزانه هم اجرا شود (وقتی برنامه را باز می‌کنید).</div>
+      <label>نام</label><input id="ag-name" placeholder="مثلاً: گزارش صبحگاهی">
+      <label>دستور</label><textarea id="ag-inst" rows="3" placeholder="مثلاً: هوای مسقط را بگیر، سه خبر مهم امروز را پیدا کن و خلاصه را در یک یادداشت ذخیره کن."></textarea>
+      <div class="row"><div><label>اجرای روزانه (اختیاری)</label><input id="ag-time" type="time" style="direction:ltr"></div>
+      <div><label><input type="checkbox" id="ag-save" style="width:auto" checked> ذخیرهٔ نتیجه در یادداشت‌ها</label></div></div>
+      <div style="margin-top:8px"><button class="btn" id="ag-add">ساختن عامل</button></div>
+    </div>
+    <div id="ag-list"></div>
+  </section>
+
+  <section class="view" id="v-tasks">
+    <div class="card"><h3>افزودن کار یا یادآوری</h3>
+      <input id="tk-title" placeholder="مثلاً: خرید نان">
+      <div class="row"><div><label>زمان (اختیاری)</label><input id="tk-due" type="datetime-local" style="direction:ltr"></div>
+      <div><label>تکرار</label><select id="tk-rep"><option value="none">بدون تکرار</option><option value="daily">روزانه</option><option value="weekly">هفتگی</option><option value="monthly">ماهانه</option></select></div></div>
+      <div style="margin-top:8px"><button class="btn" id="tk-add">افزودن</button></div>
+    </div>
+    <div class="card"><h3>صندوق کارها</h3><div id="tk-list"></div></div>
+  </section>
+
+  <section class="view" id="v-notes">
+    <div class="card"><h3>یادداشت جدید</h3>
+      <input id="nt-title" placeholder="عنوان">
+      <textarea id="nt-body" rows="5" placeholder="متن…" style="margin-top:6px"></textarea>
+      <div style="margin-top:8px" class="row"><button class="btn" id="nt-save">ذخیره</button><button class="btn2" id="nt-up">📎 افزودن فایل (txt، md، pdf)</button></div>
+      <div id="nt-status" class="muted"></div>
+    </div>
+    <div class="card"><h3>یادداشت‌ها و فایل‌ها</h3><div id="nt-list"></div></div>
+  </section>
+
+  <section class="view" id="v-memory">
+    <div class="card"><h3>حافظه</h3>
+      <div class="muted">چیزهایی که دستیار دربارهٔ شما به خاطر می‌سپارد. در گفتگو هم می‌توانید بگویید «یادت باشه که…».</div>
+      <div class="row" style="margin-top:8px"><input id="mem-new" placeholder="مثلاً: من چای سبز دوست دارم"><button class="btn" id="mem-add" style="flex:0 0 auto">افزودن</button></div>
+    </div>
+    <div class="card"><div id="mem-list"></div></div>
+  </section>
+
+  <section class="view" id="v-settings">
+    <div class="card"><h3>مغز آنلاین</h3>
+      <div class="warn">⚠️ پیام‌های شما برای پاسخ‌گویی به یک سرویس اینترنتی رایگان (Pollinations.ai و در صورت شلوغی LLM7.io) فرستاده می‌شود. اطلاعات بسیار خصوصی را نفرستید.</div>
+      <label>کلید رایگان شخصی (اختیاری؛ مثلاً OpenRouter یا Google Gemini)</label>
+      <select id="st-prov"><option value="">بدون کلید (Pollinations، و LLM7 به‌عنوان پشتیبان)</option><option value="openrouter">OpenRouter (مدل‌های رایگان)</option><option value="gemini">Google Gemini (سطح رایگان)</option></select>
+      <input id="st-key" type="password" style="direction:ltr;margin-top:6px" placeholder="کلید (اختیاری)">
+      <input id="st-model" style="direction:ltr;margin-top:6px" placeholder="مدل (اختیاری)">
+      <div style="margin-top:8px"><button class="btn2" id="st-osave">ذخیره</button></div>
+    </div>
+    <div class="card"><h3>صدا</h3>
+      <label><input type="checkbox" id="st-tts" style="width:auto"> خواندن خودکار پاسخ‌ها (اگر صدای فارسی روی گوشی باشد)</label>
+      <label><input type="checkbox" id="st-whisper" style="width:auto"> تشخیص گفتار داخل گوشی با Whisper (آزمایشی؛ بار اول حدود ۸۰ مگابایت دانلود)</label>
+      <div class="muted" id="voiceinfo"></div>
+    </div>
+    <div class="card"><h3>اتصال به کامپیوتر (اختیاری)</h3>
+      <label><input type="checkbox" id="st-pcon" style="width:auto"> استفاده از کامپیوتر خانه وقتی در دسترس است</label>
+      <label>آدرس</label><input id="st-pc" style="direction:ltr" placeholder="https://192.168.100.103:8788">
+      <label>پین</label><input id="st-pin" type="password" inputmode="numeric" style="direction:ltr">
+      <div style="margin-top:8px"><button class="btn2" id="st-pcsave">ذخیره و بررسی</button> <span id="st-pcmsg" class="muted"></span></div>
+    </div>
+    <div class="card"><h3>پشتیبان‌گیری</h3>
+      <div class="muted">همهٔ اطلاعات فقط روی همین گوشی ذخیره می‌شود. پاک کردن اطلاعات Safari آن را پاک می‌کند؛ گاهی پشتیبان بگیرید.</div>
+      <div class="row" style="margin-top:8px"><button class="btn2" id="bk-exp">📤 گرفتن پشتیبان</button><button class="btn2" id="bk-imp">📥 بازگردانی</button></div>
+      <div class="muted" id="bk-info"></div>
+    </div>
+    <div class="card"><h3>وضعیت امکانات</h3><div id="feat"></div></div>
+    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون ۱٫۰ · رایگان · بدون کلید</div>
+  </section>
+</main>
+<nav id="nav">
+  <button data-v="home"><b>🏠</b>خانه</button>
+  <button data-v="chat"><b>💬</b>گفتگو</button>
+  <button data-v="agents"><b>🤖</b>عامل‌ها</button>
+  <button data-v="tasks"><b>✅</b>کارها<span class="dot hidden" id="dot-tasks"></span></button>
+  <button data-v="notes"><b>📝</b>یادداشت</button>
+  <button data-v="memory"><b>🧠</b>حافظه</button>
+  <button data-v="settings"><b>⚙️</b>تنظیمات</button>
+</nav>
+<input type="file" id="fileinput" class="hidden" accept=".txt,.md,.pdf,.csv,.json,text/plain,application/pdf">
+<input type="file" id="importinput" class="hidden" accept=".json,application/json">
+<script type="module" src="app.js"></script>
+</body>
+</html>
