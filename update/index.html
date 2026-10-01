@@ -15,7 +15,7 @@
 // It removes old service workers + caches (NOT IndexedDB data) and opens the app again.
 (async function () {
   try { if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(function (r) { return r.unregister(); })); } } catch (e) { }
-  try { if (window.caches) { const ks = await caches.keys(); await Promise.all(ks.map(function (k) { return caches.delete(k); })); } } catch (e) { }
+  try { if (window.caches) { const ks = await caches.keys(); await Promise.all(ks.filter(function (k) { return k.indexOf('goosh-tts') !== 0; }).map(function (k) { return caches.delete(k); })); } } catch (e) { }
   location.replace('../?v=' + Date.now());
 })();
 </script>

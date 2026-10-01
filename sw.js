@@ -3,13 +3,13 @@
 //   other static files are cache-first (refreshed in the background). Offline: everything falls back to the cache.
 // - On activate it deletes every older cache and, when it is replacing an older build, reloads open windows
 //   (so a page still running an old build switches to the new one without the user doing anything).
-const VERSION = 'goosh-v10';
-const FILES = ['./', 'index.html', 'app.js?v=1.3.0', 'style.css?v=1.3.0', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
+const VERSION = 'goosh-v11';
+const FILES = ['./', 'index.html', 'app.js?v=1.4.0', 'style.css?v=1.4.0', 'tts-fa.js?v=1.4.0', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
   'icons/icon.svg', 'icons/goosh-180.png', 'icons/goosh-192.png', 'icons/goosh-512.png', 'icons/goosh-maskable-512.png',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil((async () => {
-  const old = (await caches.keys()).filter(k => k !== VERSION);
+  const old = (await caches.keys()).filter(k => k !== VERSION && !k.startsWith('goosh-tts'));   // keep the downloaded Persian voice model
   await Promise.all(old.map(k => caches.delete(k)));
   await self.clients.claim();
   if (old.length) {   // upgrade from an older build → reload open windows into the new build
@@ -19,7 +19,7 @@ self.addEventListener('activate', e => e.waitUntil((async () => {
   }
 })()));
 self.addEventListener('message', e => { if (e.data === 'skipWaiting') self.skipWaiting(); });
-const NETWORK_FIRST = /(\/|index\.html|app\.js|style\.css|manifest\.webmanifest)$/;   // matched on pathname (query ignored)
+const NETWORK_FIRST = /(\/|index\.html|app\.js|tts-fa\.js|style\.css|manifest\.webmanifest)$/;   // matched on pathname (query ignored)
 self.addEventListener('fetch', e => {
   const u = new URL(e.request.url);
   if (e.request.method !== 'GET' || u.origin !== location.origin) return;   // APIs go straight to the network

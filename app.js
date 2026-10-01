@@ -79,15 +79,20 @@ async function postOnce(prov, messages, tools) {
 async function callBrain(messages, tools, onWait) {
   const errs = [];
   for (let cycle = 0; cycle < 3; cycle++) {
+    let tried = 0, limited = 0;
     for (const prov of chain()) {
-      if ((cooldown[prov.id] || 0) > Date.now()) continue;
+      if ((cooldown[prov.id] || 0) > Date.now()) { limited++; continue; }
+      tried++;
       try { return { msg: await postOnce(prov, messages, tools), name: prov.name }; }
       catch (e) {
-        errs.push(e.message);
-        if ([402, 429, 503, 502, 500].includes(e.status) || e.name === 'AbortError' || e instanceof TypeError) cooldown[prov.id] = Date.now() + 12000;
+        errs.push(e.message); if (e.status === 402 || e.status === 429) limited++;
+        if (e.status === 402) cooldown[prov.id] = Date.now() + 2 * 60000;   // keyless tier refused (Pollinations POST now answers 402) → skip it for a while
+        else if (e.status === 429) cooldown[prov.id] = Date.now() + 30000;
+        else if ([503, 502, 500].includes(e.status) || e.name === 'AbortError' || e instanceof TypeError) cooldown[prov.id] = Date.now() + 12000;
       }
     }
-    onWait && onWait(); await sleep(6000 * (cycle + 1));
+    if (limited >= chain().length) { const e = new Error(errs.slice(-3).join(' | ') || 'سرویس‌های رایگان محدود شده‌اند'); e.rateLimited = true; throw e; }   // every provider quota-limited → go to the keyless GET fallback now
+    onWait && onWait(); await sleep(4000 * (cycle + 1));
   }
   throw new Error(errs.slice(-3).join(' | ') || 'سرویس‌های آنلاین پاسخ ندادند');
 }
@@ -212,27 +217,44 @@ const overdue = () => D.tasks.filter(t => !t.done && t.due && new Date(t.due) <=
 // ------------------------------------------------------------------ agent loop
 function systemPrompt() {
   const mem = D.memory.slice(-30).map(m => '- ' + m.text).join('\n');
-  return 'تو «گوش مصنوعی» هستی، دستیار شخصی مهربان کاربر روی آیفون. همیشه و فقط به زبان فارسی، کوتاه و روشن پاسخ بده. ' +
+  return 'تو «گوش مصنوعی» هستی، دستیار شخصی مهربان کاربر روی آیفون. کوتاه و روشن پاسخ بده. ' +
+    'زبان: همیشه به همان زبانی پاسخ بده که کاربر نوشته است؛ زبان پیش‌فرض فارسی است. اگر پیام کاربر حروف فارسی/عربی دارد، فقط و فقط به فارسی روان پاسخ بده — هرگز انگلیسی یا عربی. ' +
+    '(Always reply in the same language the user wrote in; if the message contains Persian/Arabic script, reply ONLY in fluent Persian (Farsi), never English or Arabic.) ' +
     'تاریخ و ساعت فعلی: ' + new Date().toLocaleString('fa-IR', { dateStyle: 'full', timeStyle: 'short' }) + ' (ISO ' + new Date().toISOString() + '، منطقهٔ زمانی ' + Intl.DateTimeFormat().resolvedOptions().timeZone + '). ' +
     'از ابزارها استفاده کن: ویکی‌پدیا، آب‌وهوا، جستجوی وب، خواندن صفحه، اخبار، نرخ ارز، یادداشت‌ها، فایل‌ها، حافظه، کارها و یادآوری‌ها. ' +
     'برای کارهای چندمرحله‌ای اول make_plan را صدا بزن. هیچ‌وقت ادعا نکن کاری انجام شده مگر ابزارش را اجرا کرده باشی. وقتی کاربر گفت چیزی را به خاطر بسپاری، remember را صدا بزن و کوتاه با «به خاطر سپردم که…» تأیید کن. با کاربر به صورت «شما» صحبت کن. درخواست‌های ساده (یادآوری، یادداشت، حافظه) را بدون پرسیدن اجازه فوراً با ابزار انجام بده.' +
     capsPrompt() + (mem ? '\nچیزهایی که دربارهٔ کاربر می‌دانی:\n' + mem : '');
 }
 const TEXTCALL = /\{\s*"name"\s*:\s*"(\w+)"\s*,\s*"arguments"\s*:\s*(\{[\s\S]*?\})\s*\}/g;
+const AR_ANY = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/;
+const FA_ONLY_HINT = '\n\n(پاسخ را فقط به فارسی روان بنویس.)';
+function persianOk(s) {   // reply is mostly Persian script (not English, and not Arabic)
+  s = String(s || ''); const ar = (s.match(/[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/g) || []).length, lat = (s.match(/[A-Za-z]/g) || []).length;
+  if (!ar || ar < lat * 0.5) return false;
+  if (ar > 40 && !/[\u067E\u0686\u0698\u06AF\u06CC\u06A9]/.test(s)) return false;   // no پ چ ژ گ ی ک at all → probably Arabic
+  return true;
+}
 async function agent(history, ui = {}) {
   const messages = [{ role: 'system', content: systemPrompt() }, ...history.slice(-16)];
+  const lastU = messages[messages.length - 1];
+  const wantFa = !!(lastU && lastU.role === 'user' && AR_ANY.test(lastU.content || ''));
+  if (wantFa) messages[messages.length - 1] = { ...lastU, content: lastU.content + FA_ONLY_HINT };   // per-message hint (not shown, not stored)
+  let faRetried = false;
   const tools = schema(); const steps = []; const used = new Set(); let noTools = false;
   const wait = () => ui.wait && ui.wait();
   try {
     for (let round = 0; round < 8; round++) {
       let res;
       try { res = await callBrain(messages, noTools ? null : tools, wait); }
-      catch (e) { if (round === 0 && !noTools) { noTools = true; res = await callBrain(messages, null, wait); } else throw e; }
+      catch (e) { if (round === 0 && !noTools && !e.rateLimited) { noTools = true; res = await callBrain(messages, null, wait); } else throw e; }
       const msg = res.msg; used.add(res.name);
       let calls = (msg.tool_calls || []).filter(c => c && c.function);
       if (!calls.length && msg.content) {   // some models print tool calls as text
         calls = [...msg.content.matchAll(TEXTCALL)].filter(m => TOOLS[m[1]] && toolAllowed(m[1])).map((m, i) => ({ id: 'tc' + round + i, type: 'function', function: { name: m[1], arguments: m[2] } }));
         if (calls.length) msg.content = '';
+      }
+      if (!calls.length && wantFa && !faRetried && (msg.content || '').trim() && !persianOk(msg.content)) {   // answered in the wrong language → retry once
+        faRetried = true; messages.push({ role: 'assistant', content: msg.content }, { role: 'user', content: 'پاسخ را فقط به فارسی بنویس.' }); continue;
       }
       if (!calls.length) { ui.done && ui.done(steps); return { reply: (msg.content || '').trim() || '(پاسخ خالی)', brain: [...used].join(' + ') + (noTools ? ' (بدون ابزار)' : '') }; }
       calls.forEach((c, i) => { c.id = c.id || 'call' + round + i; c.type = 'function'; if (typeof c.function.arguments !== 'string') c.function.arguments = JSON.stringify(c.function.arguments || {}); });
@@ -248,7 +270,9 @@ async function agent(history, ui = {}) {
     }
     throw new Error('مراحل زیاد شد');
   } catch (e) {
-    const reply = await fallbackGet([{ role: 'system', content: systemPrompt() }, ...history.slice(-8)]).catch(() => { throw e; });
+    const fh = [{ role: 'system', content: systemPrompt() }, ...history.slice(-8)];
+    let reply = await fallbackGet(fh).catch(() => { throw e; });
+    if (wantFa && !persianOk(reply)) reply = await fallbackGet([...fh, { role: 'assistant', content: reply }, { role: 'user', content: 'پاسخ را فقط به فارسی بنویس.' }]).catch(() => reply);
     return { reply, brain: 'Pollinations پشتیبان (بدون ابزار)', note: e.message };
   }
 }
@@ -350,7 +374,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
-const APP_VERSION = '1.3.0 (goosh-v10)';
+const APP_VERSION = '1.4.0 (goosh-v11)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -559,7 +583,32 @@ async function whisperRecord() {
 }
 
 // ---- text-to-speech
-let voices = [], ttsUnlocked = false, ttsToken = 0, ttsBtn = null;
+let voices = [], ttsUnlocked = false, ttsToken = 0, ttsBtn = null, ttsStopWait = null;
+// Persian voice: 'auto' (iOS Persian voice if installed, else on-device Piper), 'piper', or 'system'
+const faVoiceMode = () => { const m = LS.get('faVoice', 'auto'); return ['auto', 'piper', 'system'].includes(m) ? m : 'auto'; };
+let piperFailed = null, ttsFa = null;
+const faEngine = () => { const m = faVoiceMode(); if (m === 'system') return 'system'; if (piperFailed && m === 'auto') return 'system'; if (m === 'piper') return 'piper'; return HAS_TTS && pickVoice(true) ? 'system' : 'piper'; };
+const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.4.0').then(m => (ttsFa = m));
+const AUD = new Audio(); AUD.preload = 'auto'; AUD.setAttribute('playsinline', ''); AUD.setAttribute('webkit-playsinline', '');
+const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
+let piperMsg = null;
+async function ensurePiper(manual) {   // first use: download (~84 MB, once) with a Persian progress message
+  const m = await loadTtsFa();
+  if (!(await m.isDownloaded())) {
+    if (!piperMsg || !piperMsg.isConnected) piperMsg = addMsg('info', '');
+    piperMsg.textContent = 'در حال آماده‌سازی صدای فارسی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(m.TOTAL_BYTES / 1e6)) + ' مگابایت)… ۰٪';
+  }
+  try {
+    await m.load(f => { if (piperMsg && piperMsg.isConnected) piperMsg.textContent = 'در حال آماده‌سازی صدای فارسی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(m.TOTAL_BYTES / 1e6)) + ' مگابایت)… ' + FA(Math.round(f * 100)) + '٪'; });
+    if (piperMsg && piperMsg.isConnected) { piperMsg.remove(); piperMsg = null; }
+    return m;
+  } catch (e) {
+    if (piperMsg && piperMsg.isConnected) piperMsg.remove(); piperMsg = null;
+    piperFailed = e.name || 'load-error';
+    addMsg('info', 'صدای فارسی داخل برنامه آماده نشد؛ ' + (faVoiceMode() === 'auto' ? 'فعلاً با صدای سیستم خوانده می‌شود.' : 'اینترنت را بررسی کنید و دوباره امتحان کنید.') + errTag((e.name || 'Error') + ': ' + String(e.message || '').slice(0, 80)));
+    throw e;
+  }
+}
 const loadVoices = () => { try { voices = speechSynthesis.getVoices() || []; } catch (e) { } };
 if (HAS_TTS) { loadVoices(); speechSynthesis.onvoiceschanged = loadVoices; }   // iOS loads voices asynchronously
 function pickVoice(fa) {
@@ -568,9 +617,10 @@ function pickVoice(fa) {
   if (fa) return voices.find(v => L(v) === 'fa-ir') || voices.find(v => L(v).startsWith('fa'));
   return voices.find(v => L(v) === 'en-us' && v.localService) || voices.find(v => L(v) === 'en-us') || voices.find(v => L(v).startsWith('en'));
 }
-function unlockTTS() {   // first user tap: speak a silent, empty utterance so later (non-tap) speech is allowed on iOS
-  if (ttsUnlocked || !HAS_TTS) return; ttsUnlocked = true;
-  try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) { }
+function unlockTTS() {   // first user tap: silent utterance + silent <audio> play so later (non-tap) speech/audio is allowed on iOS
+  if (ttsUnlocked) return; ttsUnlocked = true;
+  if (HAS_TTS) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) { } }
+  try { AUD.src = SILENT_WAV; const pr = AUD.play(); if (pr && pr.catch) pr.catch(() => { }); } catch (e) { }
 }
 function speechText(t) {   // strip markdown, links and code so only prose is read aloud
   return String(t || '')
@@ -599,44 +649,79 @@ function chunkText(t, max = 190) {   // sentence chunks under ~200 chars (long u
   return out;
 }
 function setTtsBtn(b) { if (ttsBtn) ttsBtn.textContent = '🔊'; ttsBtn = b; if (b) b.textContent = '⏹'; }
-function stopSpeaking() { ttsToken++; if (HAS_TTS) { try { speechSynthesis.cancel(); } catch (e) { } } setTtsBtn(null); }
+function stopSpeaking() {
+  ttsToken++; if (HAS_TTS) { try { speechSynthesis.cancel(); } catch (e) { } }
+  try { if (!AUD.paused) AUD.pause(); } catch (e) { }
+  if (ttsStopWait) { const f = ttsStopWait; ttsStopWait = null; f(); }
+  setTtsBtn(null);
+}
+function playSystemChunk(p, my) {   // one speechSynthesis utterance → Promise (resolves on end / error / stop)
+  return new Promise(res => {
+    if (my !== ttsToken || !HAS_TTS) return res();
+    const fa = isFaText(p), v = pickVoice(fa);
+    const u = new SpeechSynthesisUtterance(p);
+    if (v) { u.voice = v; u.lang = v.lang; } else if (!fa) u.lang = 'en-US'; else if (!voices.length) u.lang = 'fa-IR';
+    let fired = false; const t0 = Date.now();
+    const fin = () => { if (fired) return; fired = true; clearInterval(wd); res(); };
+    const wd = setInterval(() => {   // watchdog: iOS occasionally never fires onend
+      if (my !== ttsToken) return fin();
+      if (Date.now() - t0 > 3000 && !speechSynthesis.speaking && !speechSynthesis.pending) fin();
+    }, 500);
+    u.onend = fin; u.onerror = ev => { const c = ev && ev.error; if (c && c !== 'interrupted' && c !== 'canceled' && my === ttsToken && playSystemChunk.manual) addMsg('info', 'خواندن با صدا ناموفق بود.' + errTag(c)); fin(); };
+    speechSynthesis.speak(u);
+  });
+}
+function playPcm(pcm, rate, my) {   // Piper audio through the (tap-unlocked) <audio> element → Promise on end
+  return new Promise(res => {
+    if (my !== ttsToken) return res();
+    const url = URL.createObjectURL(ttsFa.wav(pcm, rate)); let done = false, wd = null;
+    const fin = () => { if (done) return; done = true; clearTimeout(wd); AUD.onended = AUD.onerror = null; if (ttsStopWait === fin) ttsStopWait = null; setTimeout(() => URL.revokeObjectURL(url), 1000); res(); };
+    ttsStopWait = fin;
+    AUD.onended = fin; AUD.onerror = fin;
+    AUD.src = url;
+    wd = setTimeout(fin, (pcm.length / rate) * 1000 + 4000);   // safety net if 'ended' never fires
+    const pr = AUD.play(); if (pr && pr.catch) pr.catch(e => { if (my === ttsToken) addMsg('info', 'پخش صدا ممکن نشد؛ یک‌بار روی صفحه بزنید و دوباره امتحان کنید.' + errTag(e.name)); fin(); });
+  });
+}
 async function speak(text, opts = {}) {
   const done = () => { if (opts.onDone) opts.onDone(); };
   const clean = speechText(text);
   if (!clean) return done();
   const parts = chunkText(clean);
   const needFa = parts.some(isFaText);
-  if (needFa && HAS_TTS && !pickVoice(true) && setting('pcOn', false) && setting('pcBase', '') && await pcAvailable()) {   // existing PC voice, if paired
-    try {
-      const r = await fetch(setting('pcBase') + '/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-PIN': setting('pin', '') }, body: JSON.stringify({ text: clean, lang: 'fa' }) });
-      const a = new Audio(URL.createObjectURL(await r.blob())); a.onended = done; a.onerror = done; await a.play(); return;
-    } catch (e) { }
-  }
-  if (!HAS_TTS) { if (opts.manual) addMsg('info', 'خواندن با صدا در این مرورگر پشتیبانی نمی‌شود.'); return done(); }
-  if (needFa && voices.length && !pickVoice(true) && !LS.get('faHintShown', false)) {
-    LS.set('faHintShown', true);
-    addMsg('info', 'صدای فارسی روی این گوشی پیدا نشد؛ متن با صدای پیش‌فرض خوانده می‌شود (ممکن است نامفهوم باشد). اگر در iOS شما صدای فارسی هست: Settings ← Accessibility ← Spoken Content ← Voices ← Persian.');
-  }
-  const wasBusy = speechSynthesis.speaking || speechSynthesis.pending;
+  let engine = needFa ? faEngine() : 'system';
+  const wasBusy = HAS_TTS && (speechSynthesis.speaking || speechSynthesis.pending);
   stopSpeaking(); const my = ttsToken;
   if (opts.btn) setTtsBtn(opts.btn);
-  let i = 0;
-  const next = () => {
+  if (engine === 'piper') { try { await ensurePiper(opts.manual); } catch (e) { engine = 'system'; } if (my !== ttsToken) return; }
+  if (engine === 'system' && needFa && HAS_TTS && !pickVoice(true) && setting('pcOn', false) && setting('pcBase', '') && await pcAvailable()) {   // existing PC voice, if paired
+    try {
+      const r = await fetch(setting('pcBase') + '/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-PIN': setting('pin', '') }, body: JSON.stringify({ text: clean, lang: 'fa' }) });
+      AUD.src = URL.createObjectURL(await r.blob()); AUD.onended = () => { setTtsBtn(null); done(); }; await AUD.play(); return;
+    } catch (e) { }
+  }
+  if (engine === 'system' && !HAS_TTS) { setTtsBtn(null); if (opts.manual) addMsg('info', 'خواندن با صدا در این مرورگر پشتیبانی نمی‌شود.'); return done(); }
+  if (engine === 'system' && needFa && voices.length && !pickVoice(true) && !LS.get('faHintShown', false)) {
+    LS.set('faHintShown', true);
+    addMsg('info', 'صدای فارسی روی این گوشی پیدا نشد؛ متن با صدای پیش‌فرض خوانده می‌شود (ممکن است نامفهوم باشد). در تنظیمات ← صدا، «صدای فارسی داخل برنامه» را انتخاب کنید، یا اگر در iOS شما صدای فارسی هست: Settings ← Accessibility ← Spoken Content ← Voices ← Persian.');
+  }
+  if (wasBusy) await sleep(120);   // iOS can drop a speak() issued right after cancel()
+  playSystemChunk.manual = !!opts.manual;
+  // Persian chunks → Piper (synthesis of the next chunk overlaps playback of the current one); others → speechSynthesis
+  const items = parts.map(p => ({ p, piper: engine === 'piper' && isFaText(p) }));
+  const synth = i => { const it = items[i]; if (it && it.piper && !it.pcm) it.pcm = ttsFa.synth(it.p).catch(e => { it.err = e; return null; }); };
+  for (let i = 0; i < items.length; i++) {
     if (my !== ttsToken) return;
-    if (i >= parts.length) { setTtsBtn(null); return done(); }
-    const p = parts[i++], fa = isFaText(p), v = pickVoice(fa);
-    const u = new SpeechSynthesisUtterance(p);
-    if (v) { u.voice = v; u.lang = v.lang; } else if (!fa) u.lang = 'en-US'; else if (!voices.length) u.lang = 'fa-IR';
-    let fired = false, t0 = Date.now();
-    const fin = () => { if (fired) return; fired = true; clearInterval(wd); next(); };
-    const wd = setInterval(() => {   // watchdog: iOS occasionally never fires onend
-      if (my !== ttsToken) { clearInterval(wd); return; }
-      if (Date.now() - t0 > 3000 && !speechSynthesis.speaking && !speechSynthesis.pending) fin();
-    }, 500);
-    u.onend = fin; u.onerror = ev => { const c = ev && ev.error; if (opts.manual && c && c !== 'interrupted' && c !== 'canceled') addMsg('info', 'خواندن با صدا ناموفق بود.' + errTag(c)); fin(); };
-    speechSynthesis.speak(u);
-  };
-  wasBusy ? setTimeout(next, 120) : next();   // iOS can drop a speak() issued right after cancel()
+    const it = items[i];
+    if (it.piper) {
+      synth(i); const pcm = await it.pcm; synth(i + 1);
+      if (my !== ttsToken) return;
+      if (pcm && pcm.length) await playPcm(pcm, ttsFa ? (await ttsFa.load()).sampleRate : 22050, my);
+      else await playSystemChunk(it.p, my);
+    } else { synth(i + 1); await playSystemChunk(it.p, my); }
+  }
+  if (my !== ttsToken) return;
+  setTtsBtn(null); done();
 }
 function setSpkUI() { $('spk').textContent = ttsOn() ? '🔊' : '🔇'; $('spk').title = ttsOn() ? 'خواندن خودکار پاسخ‌ها: روشن' : 'خواندن خودکار پاسخ‌ها: خاموش'; if ($('st-tts')) $('st-tts').checked = ttsOn(); }
 function setLangUI() { $('sttlang').textContent = sttLang() === 'en-US' ? 'EN' : 'فا'; $('sttlang').title = 'زبان گفتار: ' + (sttLang() === 'en-US' ? 'انگلیسی' : 'فارسی'); }
@@ -803,7 +888,7 @@ function renderMemory() {
 // settings + features
 function fillSettings() {
   $('st-prov').value = setting('prov', ''); $('st-key').value = setting('key', ''); $('st-model').value = setting('model', '');
-  $('st-tts').checked = ttsOn(); $('st-autosend').checked = autoSend(); $('st-whisper').checked = setting('whisper', false);
+  $('st-tts').checked = ttsOn(); $('st-autosend').checked = autoSend(); $('st-favoice').value = faVoiceMode(); faVoiceStatus(); $('st-whisper').checked = setting('whisper', false);
   $('st-pcon').checked = setting('pcOn', false); $('st-pc').value = setting('pcBase', ''); $('st-pin').value = setting('pin', '');
   loadVoices && HAS_TTS && loadVoices();
   $('voiceinfo').textContent = 'تشخیص گفتار داخل برنامه: ' + (SRClass && !srBlocked() ? 'موجود (پشتیبانی واقعی به نسخهٔ iOS بستگی دارد)' : 'ناموجود — از میکروفون کیبورد آیفون استفاده کنید') +
@@ -874,10 +959,17 @@ $('mem-add').onclick = () => { const t = $('mem-new').value.trim(); if (!t) retu
 $('st-osave').onclick = () => { D.settings.prov = $('st-prov').value; D.settings.key = $('st-key').value.trim(); D.settings.model = $('st-model').value.trim(); save('settings'); alert('ذخیره شد'); };
 $('st-tts').onchange = e => { LS.set('tts', e.target.checked); if (!e.target.checked) stopSpeaking(); setSpkUI(); };
 $('st-autosend').onchange = e => { LS.set('autoSend', e.target.checked); };
+async function faVoiceStatus() {
+  const sys = HAS_TTS && pickVoice(true); let dl = false; try { dl = await (await loadTtsFa()).isDownloaded(); } catch (e) { }
+  $('favoice-status').textContent = 'صدای فارسی iOS: ' + (sys ? 'موجود (' + sys.name + ')' : 'ناموجود') + ' · صدای فارسی داخل برنامه: ' + (dl ? 'دانلود شده ✅' : 'هنوز دانلود نشده (حدود ۸۴ مگابایت، فقط یک‌بار)') + ' · الان استفاده می‌شود: ' + (faEngine() === 'piper' ? 'صدای داخل برنامه' : 'صدای سیستم');
+}
+$('st-favoice').onchange = e => { LS.set('faVoice', e.target.value); piperFailed = null; faVoiceStatus(); };
+$('st-favoice-test').onclick = () => { unlockTTS(); piperFailed = null; speak('سلام! من گوش مصنوعی هستم. صدای من را واضح می‌شنوید؟', { manual: true, onDone: faVoiceStatus }); };
+$('st-favoice-del').onclick = async () => { if (!confirm('مدل صدای فارسی از گوشی پاک شود؟ (دفعهٔ بعد دوباره دانلود می‌شود)')) return; try { await (await loadTtsFa()).clear(); } catch (e) { } faVoiceStatus(); };
 async function forceUpdate() {   // unregister service workers + delete caches (data in IndexedDB is kept), then reload fresh
   $('upd-btn').disabled = true; $('upd-btn').textContent = '⏳ در حال به‌روزرسانی…';
   try { const regs = (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) ? await navigator.serviceWorker.getRegistrations() : []; await Promise.all(regs.map(r => r.unregister())); } catch (e) { }
-  try { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } catch (e) { }
+  try { const ks = await caches.keys(); await Promise.all(ks.filter(k => !k.startsWith('goosh-tts')).map(k => caches.delete(k))); } catch (e) { }   // keep the downloaded Persian voice
   location.replace(location.pathname.replace(/[^/]*$/, '') + '?v=' + Date.now());
 }
 $('upd-btn').onclick = forceUpdate;
@@ -909,4 +1001,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   }
   window.__ready = true;
 })();
-window.__app = { APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
+window.__app = { persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
