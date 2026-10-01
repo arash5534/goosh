@@ -43,7 +43,18 @@ label{font-size:13px;color:#445;display:block;margin:8px 0 4px}
 #bar button{border:0;border-radius:18px;height:44px;min-width:44px;font-size:18px;font-family:inherit}
 #send{background:var(--blue);color:#fff;padding:0 14px;font-size:16px!important}
 #mic,#attach{background:#e8eefc;color:var(--blue)}
-#mic.rec{background:#e11;color:#fff}
+#mic.rec{background:#e11;color:#fff;animation:pulse 1.2s infinite}
+@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(238,17,17,.55)}70%{box-shadow:0 0 0 10px rgba(238,17,17,0)}100%{box-shadow:0 0 0 0 rgba(238,17,17,0)}}
+#bar button#sttlang{min-width:34px;padding:0 6px;font-size:13px;background:#f1f3f8;color:#334}
+#brainbadge{max-width:30vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#callbtn.oncall{background:#e11;color:#fff}
+.callstate.listening{background:#ffe3e3;color:#a00}.callstate.thinking{background:#fff4d6;color:#850}.callstate.speaking{background:#e3f6e8;color:#164}.callstate.paused{background:#eee;color:#444}
+#tapcont{display:block;width:calc(100% - 16px);margin:6px 8px;padding:20px 12px;font-size:19px;font-family:inherit;border:0;border-radius:16px;background:var(--blue);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.35)}
+.draft{background:#fff;border:1px solid #c9d6f5;max-width:94%;white-space:normal}
+.draft input,.draft textarea{margin-top:6px;font-size:15px}
+.draftrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+a.btn2{text-decoration:none;display:inline-block}
+.permitem{align-items:flex-start}.permitem input{margin-top:4px}
 .hidden{display:none!important}
 .item{display:flex;gap:8px;align-items:center;padding:8px 0;border-bottom:1px solid #eee}
 .item .grow{flex:1;min-width:0;word-wrap:break-word}

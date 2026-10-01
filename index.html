@@ -29,14 +29,19 @@
   <section class="view" id="v-chat">
     <div id="modebar">
       <span id="brainbadge" class="pill">مغز: آنلاین</span>
+      <span id="callstate" class="pill callstate hidden"></span>
       <span style="flex:1"></span>
+      <button id="spk" class="btn2 sm" title="خواندن خودکار پاسخ‌ها">🔊</button>
+      <button id="callbtn" class="btn2 sm">📞 تماس صوتی</button>
       <button id="newchat" class="btn2 sm">گفتگوی جدید</button>
     </div>
     <div id="log"></div>
+    <button id="tapcont" class="hidden">👆 برای ادامه ضربه بزنید</button>
     <div id="bar">
       <textarea id="t" rows="1" placeholder="پیام…"></textarea>
       <button id="attach" title="فایل">📎</button>
-      <button id="mic" title="صحبت">🎤</button>
+      <button id="sttlang" title="زبان گفتار">فا</button>
+      <button id="mic" title="صحبت (دوباره بزنید تا متوقف شود)">🎤</button>
       <button id="send">ارسال</button>
     </div>
   </section>
@@ -91,9 +96,14 @@
       <div style="margin-top:8px"><button class="btn2" id="st-osave">ذخیره</button></div>
     </div>
     <div class="card"><h3>صدا</h3>
-      <label><input type="checkbox" id="st-tts" style="width:auto"> خواندن خودکار پاسخ‌ها (اگر صدای فارسی روی گوشی باشد)</label>
+      <label><input type="checkbox" id="st-tts" style="width:auto"> خواندن خودکار پاسخ‌ها با صدا (همان دکمهٔ 🔊 در گفتگو)</label>
+      <label><input type="checkbox" id="st-autosend" style="width:auto"> ارسال خودکار متن بعد از پایان صحبت</label>
       <label><input type="checkbox" id="st-whisper" style="width:auto"> تشخیص گفتار داخل گوشی با Whisper (آزمایشی؛ بار اول حدود ۸۰ مگابایت دانلود)</label>
       <div class="muted" id="voiceinfo"></div>
+    </div>
+    <div class="card" id="perms"><h3>🔐 دسترسی‌ها</h3>
+      <div class="muted">مشخص کنید دستیار از چه چیزهایی استفاده کند. تنظیمات فقط روی همین گوشی ذخیره می‌شود. دستیار هیچ‌وقت خودش چیزی نمی‌فرستد.</div>
+      <div id="perm-list"></div>
     </div>
     <div class="card"><h3>اتصال به کامپیوتر (اختیاری)</h3>
       <label><input type="checkbox" id="st-pcon" style="width:auto"> استفاده از کامپیوتر خانه وقتی در دسترس است</label>
@@ -107,7 +117,7 @@
       <div class="muted" id="bk-info"></div>
     </div>
     <div class="card"><h3>وضعیت امکانات</h3><div id="feat"></div></div>
-    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون ۱٫۰ · رایگان · بدون کلید</div>
+    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون ۱٫۱ · رایگان · بدون کلید</div>
   </section>
 </main>
 <nav id="nav">
