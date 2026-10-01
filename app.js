@@ -350,6 +350,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
+const APP_VERSION = '1.2.0 (goosh-v9)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -360,7 +361,7 @@ const ttsOn = () => LS.get('tts', true);
 const autoSend = () => LS.get('autoSend', true);
 const sess = { get: k => { try { return sessionStorage.getItem('goosh.' + k); } catch (e) { return null; } }, set: (k, v) => { try { sessionStorage.setItem('goosh.' + k, v); } catch (e) { } } };
 const srBlocked = () => sess.get('srBlocked') === '1';
-const markSrBlocked = () => sess.set('srBlocked', '1');
+const markSrBlocked = code => { sess.set('srBlocked', '1'); if (code) sess.set('srBlockedCode', code); };
 
 const STT_ERR = {
   'not-allowed': 'اجازهٔ میکروفون یا تشخیص گفتار داده نشد. در آیفون: Settings ← Safari ← Microphone را روی Allow بگذارید و Settings ← Privacy & Security ← Speech Recognition را روشن کنید، بعد برنامه را کامل ببندید و دوباره باز کنید. (راه جایگزین: روی کادر پیام بزنید و از میکروفون کیبورد آیفون استفاده کنید.)',
@@ -370,11 +371,19 @@ const STT_ERR = {
   'language-not-supported': 'این زبان برای تشخیص گفتار در این گوشی پشتیبانی نمی‌شود. زبان را با دکمهٔ «فا/EN» عوض کنید یا از میکروفون کیبورد آیفون استفاده کنید.',
 };
 const DICTATION_HINT = 'تشخیص گفتار داخل برنامه در این گوشی' + (STANDALONE ? ' (در حالت برنامهٔ صفحهٔ اصلی)' : '') + ' در دسترس نیست. راه جایگزین: روی کادر پیام بزنید و دکمهٔ میکروفون 🎙 کیبورد آیفون (دیکته) را بزنید. مطمئن شوید «Siri و دیکته» روشن است: Settings ← General ← Keyboard ← Enable Dictation، و Settings ← Siri. (گزینهٔ دیگر: «Whisper داخل گوشی» در تنظیمات همین برنامه.)';
-function dictationFallback() {
+const errTag = code => code ? '\n[کد خطا: ' + code + ']' : '';
+function dictationFallback(code) {
   try { $('t').focus(); } catch (e) { }   // inside a tap this opens the keyboard, where the dictation mic lives
-  if (sess.get('dictHint') !== '1') { sess.set('dictHint', '1'); addMsg('info', DICTATION_HINT); }
-  else addMsg('info', 'روی کادر پیام بزنید و از میکروفون 🎙 کیبورد آیفون استفاده کنید.');
+  const full = sess.get('dictHint') !== '1'; sess.set('dictHint', '1');
+  const el = addMsg('info', (full ? DICTATION_HINT : 'روی کادر پیام بزنید و از میکروفون 🎙 کیبورد آیفون استفاده کنید.') + errTag(code));
+  if (!setting('whisper', false) && navigator.mediaDevices && window.MediaRecorder) {   // real fallback: record + transcribe ON the phone (free, no server, no key)
+    const b = document.createElement('button'); b.className = 'btn2 sm'; b.style.marginTop = '6px'; b.style.display = 'block';
+    b.textContent = '🎙 استفاده از Whisper داخل گوشی (رایگان، بار اول حدود ۸۰ مگابایت دانلود)';
+    b.onclick = () => { D.settings.whisper = true; save('settings'); if ($('st-whisper')) $('st-whisper').checked = true; b.remove(); whisperRecord(); };
+    el.appendChild(b);
+  }
 }
+function voiceErr(code) { addMsg('info', (STT_ERR[code] || 'خطای میکروفون.') + errTag(code)); }
 const growInput = () => $('t').dispatchEvent(new Event('input'));
 function setMicUI(on) { $('mic').classList.toggle('rec', !!on); $('mic').textContent = on ? '⏹' : '🎤'; }
 
@@ -404,7 +413,7 @@ function startRec(onDone, gesture, keepPrefix) {
   try { const r = getRec(false); r.lang = sttLang(); r.start(); }
   catch (err) {
     try { const r2 = getRec(true); r2.lang = sttLang(); r2.start(); }   // InvalidStateError etc.: fresh instance, one retry
-    catch (err2) { S.error = /NotAllowed|Security/i.test(err2.name || '') ? 'not-allowed' : 'start-failed'; endSession(); return false; }
+    catch (err2) { S.error = /NotAllowed|Security/i.test(err2.name || '') ? 'not-allowed' : 'start-failed'; S.startErr = err2.name || String(err2); endSession(); return false; }
   }
   setMicUI(true); return true;
 }
@@ -422,14 +431,43 @@ function micClick() {
   if (S) { stopRec(false); return; }                      // tap again to stop
   if (wRec) { wRec.stop(); return; }
   if (setting('whisper', false)) return whisperRecord();
-  if (!SRClass || srBlocked()) return dictationFallback();
+  if (!SRClass) return dictationFallback('SpeechRecognition-unavailable');
+  if (srBlocked()) return dictationFallback(sess.get('srBlockedCode') || 'service-not-allowed');
+  if (!LS.get('micPrimed', false) && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) return primeMicThenListen();
   startRec(singleDone, true, true);                       // synchronous inside the tap (iOS requirement)
+}
+// First mic tap only: getUserMedia() is called synchronously inside the tap so iOS shows the microphone prompt.
+// Tracks are stopped before recognition starts (iOS cannot run both captures at once). If iOS then refuses the
+// start because we are no longer inside the tap, we ask for one more tap — every later tap starts recognition directly.
+function primeMicThenListen() {
+  setMicUI(true);
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    stream.getTracks().forEach(t => t.stop()); LS.set('micPrimed', true); setMicUI(false);
+    setTimeout(() => {
+      if (S) return;
+      startRec(s => {
+        if (s.error === 'start-failed' || s.error === 'not-allowed' || s.error === 'service-not-allowed' || (!s.error && !s.started && !s.text)) {
+          addMsg('info', 'اجازهٔ میکروفون داده شد ✅ حالا دوباره روی 🎤 بزنید و صحبت کنید.' + errTag(s.startErr || s.error)); return;
+        }
+        singleDone(s);
+      }, false, true);
+    }, 250);
+  }, err => {
+    setMicUI(false);
+    const name = (err && err.name) || 'getUserMedia-error';
+    if (name === 'NotAllowedError' || name === 'SecurityError') addMsg('info', STT_ERR['not-allowed'] + errTag(name));
+    else if (name === 'NotFoundError' || name === 'NotReadableError') addMsg('info', STT_ERR['audio-capture'] + errTag(name));
+    else addMsg('info', 'دسترسی به میکروفون ممکن نشد.' + errTag(name));
+  });
 }
 function singleDone(s) {
   if (s.cancelled) return;
   const e = s.error;
-  if (e === 'service-not-allowed' || e === 'start-failed' || (!e && !s.started && !s.text)) { if (e) markSrBlocked(); return dictationFallback(); }
-  if (e && e !== 'aborted') { addMsg('info', STT_ERR[e] || 'خطای میکروفون: ' + e); return; }
+  if (e === 'service-not-allowed' || e === 'start-failed' || (!e && !s.started && !s.text)) {
+    const code = e === 'start-failed' ? 'start-failed:' + (s.startErr || '?') : e || 'ended-without-start';
+    if (e) markSrBlocked(code); return dictationFallback(code);
+  }
+  if (e && e !== 'aborted') return voiceErr(e);
   const text = $('t').value.trim();
   if (s.text && text && autoSend() && !busy) { $('t').value = ''; growInput(); send(text); }
 }
@@ -444,7 +482,7 @@ function setPhase(p) {
 }
 function startCall() {
   unlockTTS(); stopSpeaking();
-  if (!SRClass || srBlocked()) { addMsg('info', 'تماس صوتی به تشخیص گفتار داخل برنامه نیاز دارد.\n' + DICTATION_HINT); return; }
+  if (!SRClass || srBlocked()) { addMsg('info', 'تماس صوتی به تشخیص گفتار داخل برنامه نیاز دارد.\n' + DICTATION_HINT + errTag(!SRClass ? 'SpeechRecognition-unavailable' : sess.get('srBlockedCode'))); return; }
   if (S) stopRec(true);
   if (wRec) wRec.stop();
   call.on = true; call.noSpeech = 0; call.gen++;
@@ -458,7 +496,7 @@ function stopCall(msg) {
   $('callbtn').textContent = '📞 تماس صوتی'; $('callbtn').classList.remove('oncall');
   if (msg) addMsg('info', msg);
 }
-function pauseCall(why) { setPhase('paused'); $('tapcont').textContent = '👆 برای ادامه ضربه بزنید' + (why ? ' — ' + why : ''); $('tapcont').classList.remove('hidden'); }
+function pauseCall(why, code) { setPhase('paused'); $('tapcont').textContent = '👆 برای ادامه ضربه بزنید' + (why ? ' — ' + why : '') + (code ? ' [' + code + ']' : ''); $('tapcont').classList.remove('hidden'); }
 function callListen(gesture) {
   if (!call.on) return;
   $('tapcont').classList.add('hidden'); $('t').value = ''; growInput(); setPhase('listening');
@@ -470,12 +508,13 @@ function callHeard(s, gen) {
   const e = s.error;
   if (e === 'not-allowed' || e === 'service-not-allowed' || e === 'start-failed' || (!e && !s.started && !s.text)) {
     if (s.gesture) {                                      // refused even inside a tap → really unavailable
-      if (e === 'not-allowed') return stopCall(STT_ERR['not-allowed']);
-      markSrBlocked(); return stopCall(DICTATION_HINT);
+      const code = e === 'start-failed' ? 'start-failed:' + (s.startErr || '?') : e || 'ended-without-start';
+      if (e === 'not-allowed') return stopCall(STT_ERR['not-allowed'] + errTag(code));
+      markSrBlocked(code); return stopCall(DICTATION_HINT + errTag(code));
     }
-    return pauseCall('');                                 // auto-restart refused outside a gesture → let the user tap
+    return pauseCall('', e === 'start-failed' ? s.startErr : e);   // auto-restart refused outside a gesture → let the user tap
   }
-  if (e && e !== 'aborted' && e !== 'no-speech') return stopCall((STT_ERR[e] || 'خطای میکروفون: ' + e) + '\nتماس پایان یافت.');
+  if (e && e !== 'aborted' && e !== 'no-speech') return stopCall((STT_ERR[e] || 'خطای میکروفون.') + '\nتماس پایان یافت.' + errTag(e));
   const text = $('t').value.trim() || s.text;
   if (!text) {                                            // no-speech (or empty result): retry a few times, then pause
     if (++call.noSpeech >= MAX_NOSPEECH) return pauseCall('صدایی نشنیدم');
@@ -498,8 +537,8 @@ function callMicTap() {
 let wRec = null, wChunks = [], asr = null;
 async function whisperRecord() {
   if (wRec) { wRec.stop(); return; }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(() => null);
-  if (!stream) { addMsg('error', 'اجازهٔ میکروفون داده نشد (Settings ← Safari ← Microphone).'); return; }
+  let gumErr = null; const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(e => { gumErr = e; return null; });
+  if (!stream) { addMsg('error', 'اجازهٔ میکروفون داده نشد (Settings ← Safari ← Microphone).' + errTag(gumErr && gumErr.name)); return; }
   const type = ['audio/mp4', 'audio/webm'].find(t => MediaRecorder.isTypeSupported(t)) || '';
   wRec = new MediaRecorder(stream, type ? { mimeType: type } : {}); wChunks = [];
   wRec.ondataavailable = e => wChunks.push(e.data);
@@ -514,7 +553,7 @@ async function whisperRecord() {
       const out = await asr(audio, { language: sttLang() === 'en-US' ? 'english' : 'persian', task: 'transcribe' });
       w.remove(); const txt = out.text.trim();
       if (!txt) addMsg('info', 'متوجه نشدم.'); else if (autoSend()) send(txt); else { $('t').value = txt; growInput(); }
-    } catch (e) { w.remove(); addMsg('error', 'Whisper: ' + e.message); }
+    } catch (e) { w.remove(); addMsg('error', 'Whisper: ' + e.message + errTag(e.name)); }
   };
   wRec.start(); setMicUI(true); setTimeout(() => wRec && wRec.stop(), 30000);
 }
@@ -594,7 +633,7 @@ async function speak(text, opts = {}) {
       if (my !== ttsToken) { clearInterval(wd); return; }
       if (Date.now() - t0 > 3000 && !speechSynthesis.speaking && !speechSynthesis.pending) fin();
     }, 500);
-    u.onend = fin; u.onerror = fin;
+    u.onend = fin; u.onerror = ev => { const c = ev && ev.error; if (opts.manual && c && c !== 'interrupted' && c !== 'canceled') addMsg('info', 'خواندن با صدا ناموفق بود.' + errTag(c)); fin(); };
     speechSynthesis.speak(u);
   };
   wasBusy ? setTimeout(next, 120) : next();   // iOS can drop a speak() issued right after cancel()
@@ -769,6 +808,7 @@ function fillSettings() {
   loadVoices && HAS_TTS && loadVoices();
   $('voiceinfo').textContent = 'تشخیص گفتار داخل برنامه: ' + (SRClass && !srBlocked() ? 'موجود (پشتیبانی واقعی به نسخهٔ iOS بستگی دارد)' : 'ناموجود — از میکروفون کیبورد آیفون استفاده کنید') +
     ' · صدای فارسی برای خواندن: ' + (HAS_TTS && pickVoice(true) ? 'موجود' : HAS_TTS && !voices.length ? 'نامعلوم (فهرست صداها هنوز بار نشده)' : 'ناموجود') + (STANDALONE ? ' · حالت برنامهٔ صفحهٔ اصلی' : '');
+  $('appver').textContent = 'نسخه ' + APP_VERSION + (navigator.serviceWorker && navigator.serviceWorker.controller ? '' : ' · بدون service worker');
   renderPerms(); renderFeatures();
 }
 function renderPerms() {
@@ -854,7 +894,11 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   if (navigator.storage?.persist) navigator.storage.persist().then(p => { $('bk-info') && ($('bk-info').textContent = p ? 'ذخیره‌سازی ماندگار فعال است.' : 'مرورگر ذخیره‌سازی ماندگار را تأیید نکرد؛ پشتیبان بگیرید.'); });
   renderChat(); refreshBadges(); go(new URLSearchParams(location.search).get('view') || D.settings.view || 'home');
   notifyDue(); catchUpAgents();
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
+  if ('serviceWorker' in navigator) {
+    const hadController = !!navigator.serviceWorker.controller; let reloaded = false;
+    navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded && !call.on) { reloaded = true; location.reload(); } });   // new build took over → load it now
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
+  }
   window.__ready = true;
 })();
-window.__app = { D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
+window.__app = { APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
