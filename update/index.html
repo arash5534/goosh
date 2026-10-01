@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0b0c">
+<title>به‌روزرسانی گوش</title>
+</head>
+<body style="margin:0;height:100vh;display:flex;align-items:center;justify-content:center;background:#0b0b0c;color:#fff;font-family:-apple-system,Tahoma,sans-serif;text-align:center">
+<div><div style="font-size:42px">🔄</div><div id="m">در حال دریافت آخرین نسخهٔ «گوش مصنوعی»…</div>
+<div style="font-size:13px;opacity:.7;margin-top:8px">یادداشت‌ها و اطلاعات شما پاک نمی‌شود.</div>
+<a href="../" style="color:#9cf;display:inline-block;margin-top:16px">اگر خودکار باز نشد، اینجا بزنید</a></div>
+<script>
+// Reset page: this URL was never cached by older builds, so it always loads fresh from the network.
+// It removes old service workers + caches (NOT IndexedDB data) and opens the app again.
+(async function () {
+  try { if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) { const regs = await navigator.serviceWorker.getRegistrations(); await Promise.all(regs.map(function (r) { return r.unregister(); })); } } catch (e) { }
+  try { if (window.caches) { const ks = await caches.keys(); await Promise.all(ks.map(function (k) { return caches.delete(k); })); } } catch (e) { }
+  location.replace('../?v=' + Date.now());
+})();
+</script>
+</body>
+</html>

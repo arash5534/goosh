@@ -5,13 +5,15 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="default">
-<meta name="apple-mobile-web-app-title" content="گوش مصنوعی">
-<meta name="theme-color" content="#2563eb">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="apple-mobile-web-app-title" content="گوش">
+<meta name="application-name" content="گوش">
+<meta name="theme-color" content="#0b0b0c">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
-<link rel="icon" href="icons/icon-192.png">
-<link rel="stylesheet" href="style.css">
+<link rel="apple-touch-icon" href="icons/goosh-180.png" sizes="180x180">
+<link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+<link rel="icon" href="icons/goosh-192.png" sizes="192x192" type="image/png">
+<link rel="stylesheet" href="style.css?v=1.3.0">
 <title>گوش مصنوعی</title>
 </head>
 <body>
@@ -117,7 +119,9 @@
       <div class="muted" id="bk-info"></div>
     </div>
     <div class="card"><h3>وضعیت امکانات</h3><div id="feat"></div></div>
-    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون · رایگان · بدون کلید<br><b id="appver" style="direction:ltr;display:inline-block">نسخه 1.2.0 (goosh-v9)</b></div>
+    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون · رایگان · بدون کلید<br><b id="appver" style="direction:ltr;display:inline-block">نسخه 1.3.0 (goosh-v10)</b>
+      <div style="margin-top:8px"><button class="btn2" id="upd-btn">🔄 به‌روزرسانی (دریافت آخرین نسخه)</button></div>
+      <div class="muted">اگر برنامه نسخهٔ قدیمی را نشان می‌دهد این دکمه را بزنید. یادداشت‌ها و اطلاعات شما پاک نمی‌شود.</div></div>
   </section>
 </main>
 <nav id="nav">
@@ -131,6 +135,6 @@
 </nav>
 <input type="file" id="fileinput" class="hidden" accept=".txt,.md,.pdf,.csv,.json,text/plain,application/pdf">
 <input type="file" id="importinput" class="hidden" accept=".json,application/json">
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=1.3.0"></script>
 </body>
 </html>

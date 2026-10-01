@@ -1,15 +1,19 @@
 {
   "name": "گوش مصنوعی",
-  "short_name": "گوش مصنوعی",
+  "short_name": "گوش",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "background_color": "#f4f6fb",
-  "theme_color": "#2563eb",
+  "background_color": "#0b0b0c",
+  "theme_color": "#0b0b0c",
   "lang": "fa",
   "dir": "rtl",
   "icons": [
-    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
-    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+    {"src": "icons/goosh-180.png", "sizes": "180x180", "type": "image/png", "purpose": "any"},
+    {"src": "icons/goosh-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+    {"src": "icons/goosh-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "icons/goosh-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
+    {"src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"}
   ]
 }

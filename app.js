@@ -350,7 +350,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
-const APP_VERSION = '1.2.0 (goosh-v9)';
+const APP_VERSION = '1.3.0 (goosh-v10)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -874,6 +874,13 @@ $('mem-add').onclick = () => { const t = $('mem-new').value.trim(); if (!t) retu
 $('st-osave').onclick = () => { D.settings.prov = $('st-prov').value; D.settings.key = $('st-key').value.trim(); D.settings.model = $('st-model').value.trim(); save('settings'); alert('ذخیره شد'); };
 $('st-tts').onchange = e => { LS.set('tts', e.target.checked); if (!e.target.checked) stopSpeaking(); setSpkUI(); };
 $('st-autosend').onchange = e => { LS.set('autoSend', e.target.checked); };
+async function forceUpdate() {   // unregister service workers + delete caches (data in IndexedDB is kept), then reload fresh
+  $('upd-btn').disabled = true; $('upd-btn').textContent = '⏳ در حال به‌روزرسانی…';
+  try { const regs = (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) ? await navigator.serviceWorker.getRegistrations() : []; await Promise.all(regs.map(r => r.unregister())); } catch (e) { }
+  try { const ks = await caches.keys(); await Promise.all(ks.map(k => caches.delete(k))); } catch (e) { }
+  location.replace(location.pathname.replace(/[^/]*$/, '') + '?v=' + Date.now());
+}
+$('upd-btn').onclick = forceUpdate;
 $('st-whisper').onchange = e => { D.settings.whisper = e.target.checked; save('settings'); };
 $('st-pcon').onchange = e => { D.settings.pcOn = e.target.checked; save('settings'); renderFeatures(); };
 $('st-pcsave').onclick = async () => { D.settings.pcBase = $('st-pc').value.trim().replace(/\/$/, ''); D.settings.pin = $('st-pin').value.trim(); D.settings.pcOn = true; $('st-pcon').checked = true; save('settings'); $('st-pcmsg').textContent = (await pcAvailable()) ? '✅ وصل شد' : '❌ در دسترس نیست'; };
@@ -896,6 +903,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   notifyDue(); catchUpAgents();
   if ('serviceWorker' in navigator) {
     const hadController = !!navigator.serviceWorker.controller; let reloaded = false;
+    navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'reload' && !reloaded && !call.on) { reloaded = true; location.reload(); } });
     navigator.serviceWorker.addEventListener('controllerchange', () => { if (hadController && !reloaded && !call.on) { reloaded = true; location.reload(); } });   // new build took over → load it now
     navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).then(reg => { reg.update().catch(() => { }); document.addEventListener('visibilitychange', () => { if (!document.hidden) reg.update().catch(() => { }); }); }).catch(() => { });
   }
