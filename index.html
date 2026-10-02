@@ -13,7 +13,7 @@
 <link rel="apple-touch-icon" href="icons/goosh-180.png" sizes="180x180">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="icon" href="icons/goosh-192.png" sizes="192x192" type="image/png">
-<link rel="stylesheet" href="style.css?v=1.4.0">
+<link rel="stylesheet" href="style.css?v=1.5.0">
 <title>گوش مصنوعی</title>
 </head>
 <body>
@@ -39,9 +39,12 @@
     </div>
     <div id="log"></div>
     <button id="tapcont" class="hidden">👆 برای ادامه ضربه بزنید</button>
+    <div id="attachmenu" class="hidden">
+      <button id="am-photo">🖼 عکس</button><button id="am-video">🎥 ویدیو</button><button id="am-cam">📷 دوربین</button><button id="am-rec">🎬 فیلم‌برداری</button><button id="am-file">📄 فایل متنی/PDF</button>
+    </div>
     <div id="bar">
       <textarea id="t" rows="1" placeholder="پیام…" dir="auto" lang="fa"></textarea>
-      <button id="attach" title="فایل">📎</button>
+      <button id="attach" title="عکس، ویدیو یا فایل">📎</button>
       <button id="sttlang" title="زبان گفتار">فا</button>
       <button id="mic" title="صحبت (دوباره بزنید تا متوقف شود)">🎤</button>
       <button id="send">ارسال</button>
@@ -127,7 +130,7 @@
       <div class="muted" id="bk-info"></div>
     </div>
     <div class="card"><h3>وضعیت امکانات</h3><div id="feat"></div></div>
-    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون · رایگان · بدون کلید<br><b id="appver" style="direction:ltr;display:inline-block">نسخه 1.4.0 (goosh-v11)</b>
+    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون · رایگان · بدون کلید<br><b id="appver" style="direction:ltr;display:inline-block">نسخه 1.5.0 (goosh-v12)</b>
       <div style="margin-top:8px"><button class="btn2" id="upd-btn">🔄 به‌روزرسانی (دریافت آخرین نسخه)</button></div>
       <div class="muted">اگر برنامه نسخهٔ قدیمی را نشان می‌دهد این دکمه را بزنید. یادداشت‌ها و اطلاعات شما پاک نمی‌شود.</div></div>
   </section>
@@ -142,7 +145,16 @@
   <button data-v="settings"><b>⚙️</b>تنظیمات</button>
 </nav>
 <input type="file" id="fileinput" class="hidden" accept=".txt,.md,.pdf,.csv,.json,text/plain,application/pdf">
+<input type="file" id="imginput" class="hidden" accept="image/*">
+<input type="file" id="vidinput" class="hidden" accept="video/*">
+<input type="file" id="caminput" class="hidden" accept="image/*" capture="environment">
+<input type="file" id="recinput" class="hidden" accept="video/*" capture="environment">
+<div id="composer" class="hidden"><div class="sheet">
+  <div id="cmp-prev"></div><div class="muted" id="cmp-info"></div>
+  <textarea id="cmp-text" rows="2" dir="auto" lang="fa"></textarea>
+  <div class="row" style="margin-top:8px"><button class="btn" id="cmp-send">ارسال</button><button class="btn2" id="cmp-cancel" style="flex:0 0 auto">لغو</button></div>
+</div></div>
 <input type="file" id="importinput" class="hidden" accept=".json,application/json">
-<script type="module" src="app.js?v=1.4.0"></script>
+<script type="module" src="app.js?v=1.5.0"></script>
 </body>
 </html>

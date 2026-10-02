@@ -62,3 +62,13 @@ a.btn2{text-decoration:none;display:inline-block}
 .feat td{padding:4px 6px;font-size:14px;border-bottom:1px solid #eee}
 .ok{color:#080}.no{color:#b00}.part{color:#a60}
 .out{white-space:pre-wrap;background:#f7f7fb;border-radius:8px;padding:8px;margin-top:6px;font-size:14px;line-height:1.8}
+#attachmenu{display:flex;flex-wrap:wrap;gap:6px;padding:8px;background:#fff;border-top:1px solid #ddd}
+#attachmenu button{flex:1 1 30%;border:0;border-radius:12px;padding:10px 6px;background:#eef2ff;color:#234;font-size:14px;font-family:inherit}
+.mthumb{position:relative;display:inline-block;margin-bottom:6px;cursor:pointer}
+.mthumb img{display:block;max-width:220px;max-height:220px;border-radius:12px}
+.mthumb .vbadge{position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.65);color:#fff;font-size:12px;border-radius:8px;padding:1px 6px}
+.viewer{position:fixed;inset:0;background:rgba(0,0,0,.92);z-index:50;overflow:auto;display:flex;flex-direction:column;align-items:center;gap:8px;padding:calc(env(safe-area-inset-top) + 10px) 8px 20px}
+.viewer img{max-width:100%;border-radius:8px}
+#composer{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:40;display:flex;align-items:flex-end}
+#composer .sheet{background:#fff;width:100%;border-radius:18px 18px 0 0;padding:14px 14px calc(env(safe-area-inset-bottom) + 14px);max-height:90vh;overflow:auto}
+#composer textarea{margin-top:8px}

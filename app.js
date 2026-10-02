@@ -62,9 +62,14 @@ function chain() {
   list.push({ ...PROVIDERS.pollinations, id: 'pollinations' }, { ...PROVIDERS.llm7, id: 'llm7' });
   return list;
 }
+// message content may be a string or OpenAI-style parts [{type:'text'}, {type:'image_url'}] (only for vision-capable providers)
+const textOf = c => typeof c === 'string' ? c : Array.isArray(c) ? c.filter(p => p && p.type === 'text').map(p => p.text).join('\n') : String(c ?? '');
+const visionCapable = prov => !!prov && !!prov.key && (prov.id === 'gemini' || /vision|\bvl\b|-vl|gemini|gpt-4o|gpt-4\.1|gpt-5|llama-4|pixtral|qwen.*vl|claude/i.test(prov.model || ''));
+const flatten = messages => messages.map(m => Array.isArray(m.content) ? { ...m, content: textOf(m.content) + (m.content.some(p => p.type === 'image_url') ? '\n[تصویر پیوست شده بود اما این سرویس نمی‌تواند تصویر را ببیند.]' : '') } : m);
 async function postOnce(prov, messages, tools) {
   const headers = { 'Content-Type': 'application/json' };
   if (prov.key) headers.Authorization = 'Bearer ' + prov.key;
+  if (!visionCapable(prov)) messages = flatten(messages);
   const body = { model: prov.model, messages };
   if (tools && tools.length) body.tools = tools;
   const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 75000);
@@ -98,7 +103,7 @@ async function callBrain(messages, tools, onWait) {
 }
 async function fallbackGet(messages) {   // Pollinations simple GET endpoint (no tools) as a last resort
   const sys = messages.find(m => m.role === 'system')?.content || '';
-  const convo = messages.filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => (m.role === 'user' ? 'کاربر: ' : 'دستیار: ') + m.content).join('\n');
+  const convo = flatten(messages).filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => (m.role === 'user' ? 'کاربر: ' : 'دستیار: ') + m.content).join('\n');
   const url = 'https://text.pollinations.ai/' + encodeURIComponent(convo.slice(-3500) + '\nدستیار:') + '?system=' + encodeURIComponent(sys.slice(0, 1500));
   const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); const t = (await r.text()).trim();
   if (!t) throw new Error('empty'); return t;
@@ -237,8 +242,8 @@ function persianOk(s) {   // reply is mostly Persian script (not English, and no
 async function agent(history, ui = {}) {
   const messages = [{ role: 'system', content: systemPrompt() }, ...history.slice(-16)];
   const lastU = messages[messages.length - 1];
-  const wantFa = !!(lastU && lastU.role === 'user' && AR_ANY.test(lastU.content || ''));
-  if (wantFa) messages[messages.length - 1] = { ...lastU, content: lastU.content + FA_ONLY_HINT };   // per-message hint (not shown, not stored)
+  const wantFa = !!(lastU && lastU.role === 'user' && AR_ANY.test(textOf(lastU.content)));
+  if (wantFa) messages[messages.length - 1] = { ...lastU, content: Array.isArray(lastU.content) ? [...lastU.content.map(p => p.type === 'text' ? { ...p, text: p.text + FA_ONLY_HINT } : p)] : lastU.content + FA_ONLY_HINT };   // per-message hint (not shown, not stored)
   let faRetried = false;
   const tools = schema(); const steps = []; const used = new Set(); let noTools = false;
   const wait = () => ui.wait && ui.wait();
@@ -297,8 +302,24 @@ function addMsg(role, text, extra = {}) {
     const sp = document.createElement('button'); sp.textContent = '🔊'; sp.title = 'خواندن با صدا'; sp.onclick = () => { unlockTTS(); if (ttsBtn === sp) return stopSpeaking(); speak(text, { btn: sp, manual: true }); }; m.appendChild(sp);
     const cp = document.createElement('button'); cp.textContent = '📋'; cp.onclick = () => navigator.clipboard?.writeText(text); m.appendChild(cp);
     d.appendChild(m);
+  } else if (extra.media) {
+    d.appendChild(mediaEl(extra.media));
+    const t = document.createElement('div'); t.textContent = text; d.appendChild(t);
   } else d.textContent = text;
   $('log').appendChild(d); $('log').scrollTop = $('log').scrollHeight; return d;
+}
+function mediaEl(md) {   // thumbnail (+ ▶ and duration for videos); tap to enlarge
+  const w = document.createElement('div'); w.className = 'mthumb' + (md.kind === 'video' ? ' vid' : '');
+  const im = document.createElement('img'); im.src = md.thumb || (md.images && md.images[0]) || ''; im.alt = md.kind === 'video' ? 'ویدیو' : 'عکس'; w.appendChild(im);
+  if (md.kind === 'video') { const b = document.createElement('span'); b.className = 'vbadge'; b.textContent = '▶ ' + fmtDur(md.duration) + ' · ' + FA((md.images || []).length) + ' فریم'; w.appendChild(b); }
+  w.onclick = () => openViewer(md);
+  return w;
+}
+const fmtDur = s => { s = Math.round(s || 0); return FA(Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0')); };
+function openViewer(md) {
+  const o = document.createElement('div'); o.className = 'viewer'; o.onclick = () => o.remove();
+  (md.images && md.images.length ? md.images : [md.thumb]).forEach(src => { const im = document.createElement('img'); im.src = src; o.appendChild(im); });
+  document.body.appendChild(o);
 }
 function cardEl(c) {   // draft / file card: every action here is a button the USER taps; nothing is sent automatically
   const d = document.createElement('div'); d.className = 'msg draft'; d.dir = 'rtl';
@@ -335,15 +356,120 @@ function renderChat() {
   D.history.forEach(m => { if (m.role === 'card') $('log').appendChild(cardEl(m)); else addMsg(m.role, m.content, m); });
 }
 const TOOL_FA = { get_datetime: 'ساعت', wikipedia: 'ویکی‌پدیا', get_weather: 'آب‌وهوا', web_search: 'جستجوی وب', read_webpage: 'خواندن صفحه', get_news: 'اخبار', currency_rate: 'نرخ ارز', save_note: 'ذخیرهٔ یادداشت', read_note: 'خواندن یادداشت', list_notes: 'یادداشت‌ها', remember: 'به خاطر سپردن', list_memory: 'حافظه', forget: 'فراموش کردن', add_task: 'افزودن کار', list_tasks: 'کارها', complete_task: 'انجام کار', make_plan: 'برنامه‌ریزی' };
-let busy = false;
+let busy = false, lastFailedMedia = null;
+// ---- photos & videos -------------------------------------------------------------------------------
+const VIDEO_FRAMES = 4, PHOTO_MAX = 1024, FRAME_MAX = 768, THUMB_MAX = 320;
+function drawScaled(src, w, h, max, q) {   // any drawable → JPEG data URL with the long side ≤ max (HEIC from iPhone is decoded by Safari and re-encoded as JPEG here)
+  const k = Math.min(1, max / Math.max(w, h)); const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+  const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height); g.drawImage(src, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', q);
+}
+function loadImg(src) { return new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error('image-decode')); im.src = src; }); }
+async function decodeImage(file) {
+  if (window.createImageBitmap) { try { return await createImageBitmap(file, { imageOrientation: 'from-image' }); } catch (e) { } }
+  const url = URL.createObjectURL(file); try { return await loadImg(url); } finally { setTimeout(() => URL.revokeObjectURL(url), 5000); }
+}
+async function imageFromFile(file) {
+  let bmp; try { bmp = await decodeImage(file); } catch (e) { throw new Error('این عکس باز نشد' + (/heic|heif/i.test(file.type + file.name) ? ' (HEIC در این مرورگر پشتیبانی نمی‌شود؛ در آیفون Safari آن را باز می‌کند)' : '')); }
+  const w = bmp.width, h = bmp.height;
+  return { kind: 'image', images: [drawScaled(bmp, w, h, PHOTO_MAX, 0.8)], thumb: drawScaled(bmp, w, h, THUMB_MAX, 0.7), w, h, name: file.name || '' };
+}
+function evOnce(el, ev, ms = 10000) {
+  return new Promise((res, rej) => {
+    const done = f => { clearTimeout(t); el.removeEventListener(ev, ok); el.removeEventListener('error', bad); f(); };
+    const ok = () => done(res), bad = () => done(() => rej(new Error('video-error'))), t = setTimeout(() => done(() => rej(new Error('timeout:' + ev))), ms);
+    el.addEventListener(ev, ok); el.addEventListener('error', bad);
+  });
+}
+async function videoFromFile(file, n = VIDEO_FRAMES) {   // N evenly spaced frames + thumbnail + duration; the video itself is NOT stored
+  const url = URL.createObjectURL(file), v = document.createElement('video');
+  v.muted = true; v.defaultMuted = true; v.playsInline = true; v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', ''); v.setAttribute('muted', ''); v.preload = 'auto';
+  v.style.cssText = 'position:fixed;left:-10px;top:-10px;width:2px;height:2px;opacity:0;pointer-events:none';
+  document.body.appendChild(v);
+  try {
+    v.src = url; v.load();
+    await evOnce(v, 'loadedmetadata');
+    let dur = v.duration;
+    if (!isFinite(dur) || !dur) { v.currentTime = 1e7; await evOnce(v, 'seeked').catch(() => { }); dur = v.duration; }
+    if (!isFinite(dur) || !dur) dur = 1;
+    try { const pr = v.play(); if (pr) await pr; v.pause(); } catch (e) { }   // iOS: decode a first frame before seeking
+    if (v.readyState < 2) await evOnce(v, 'loadeddata', 6000).catch(() => { });
+    const w = v.videoWidth, h = v.videoHeight; if (!w || !h) throw new Error('video-size');
+    const frames = []; let thumb = null, blank = 0;
+    const isBlank = () => { try { const c = document.createElement('canvas'); c.width = c.height = 16; const g = c.getContext('2d'); g.drawImage(v, 0, 0, 16, 16); const d = g.getImageData(0, 0, 16, 16).data; for (let k = 3; k < d.length; k += 4) if (d[k]) return false; return true; } catch (e) { return false; } };
+    for (let i = 0; i < n; i++) {
+      const t = Math.min(dur - 0.05, dur * (i + 0.5) / n);
+      if (Math.abs(v.currentTime - t) > 0.01) { v.currentTime = Math.max(0, t); await evOnce(v, 'seeked', 8000); }
+      await new Promise(r => requestAnimationFrame(() => r()));
+      if (isBlank()) blank++;
+      frames.push(drawScaled(v, w, h, FRAME_MAX, 0.75));
+      if (!thumb) thumb = drawScaled(v, w, h, THUMB_MAX, 0.7);
+    }
+    if (blank === n) throw new Error('این مرورگر فریم‌های ویدیو را خالی برگرداند؛ لطفاً از ویدیو اسکرین‌شات بگیرید و به‌صورت عکس بفرستید');
+    return { kind: 'video', images: frames, thumb, duration: dur, times: frames.map((_, i) => +(dur * (i + 0.5) / n).toFixed(1)), w, h, name: file.name || '' };
+  } catch (e) { throw new Error('ویدیو باز نشد (' + e.message + ')'); }
+  finally { v.removeAttribute('src'); try { v.load(); } catch (e) { } v.remove(); URL.revokeObjectURL(url); }
+}
+let visionMod = null;
+const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.5.0').then(m => (visionMod = m));
+async function describeMedia(md, status) {   // on-device captions (Florence-2) → stored with the message
+  const V = await loadVision();
+  if (!(await V.isDownloaded())) status('دانلود مدل بینایی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(V.APPROX_BYTES / 1e6)) + ' مگابایت)… ۰٪');
+  await V.load(f => status('دانلود مدل بینایی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(V.APPROX_BYTES / 1e6)) + ' مگابایت)… ' + FA(Math.round(f * 100)) + '٪'));
+  const caps = [];
+  for (let i = 0; i < md.images.length; i++) {
+    status(md.kind === 'video' ? `در حال دیدن ویدیو روی گوشی… فریم ${FA(i + 1)} از ${FA(md.images.length)}` : 'در حال دیدن عکس روی گوشی…');
+    caps.push(await V.caption(md.images[i], md.kind !== 'video'));
+  }
+  md.caption = caps;
+}
+function mediaContent(m, direct) {   // what the model receives for a message with a photo/video
+  const md = m.media, text = m.content;
+  if (direct) {   // vision-capable provider (user's own key): real image parts
+    const note = md.kind === 'video' ? `\n(These are ${md.images.length} frames, in order, from a video of ${Math.round(md.duration)} seconds, taken at seconds ${md.times.join(', ')}.)` : '';
+    return [{ type: 'text', text: text + note }, ...md.images.map(u => ({ type: 'image_url', image_url: { url: u } }))];
+  }
+  const caps = md.caption || [];
+  const desc = md.kind === 'video'
+    ? `[ویدیوی ${Math.round(md.duration)} ثانیه‌ای پیوست شده. توضیح خودکار ${caps.length} فریم پشت‌سرهم (تولیدشده روی گوشی، به انگلیسی، ممکن است ناقص باشد):\n` + caps.map((c, i) => `${i + 1}) ثانیهٔ ${md.times[i]}: ${c}`).join('\n') + ']'
+    : `[عکس پیوست شده. توضیح خودکار عکس (تولیدشده روی گوشی، به انگلیسی، ممکن است ناقص باشد): "${caps[0] || ''}"]` + (md.ocr ? `\n[متن داخل عکس (OCR): "${md.ocr}"]` : '');
+  return text + '\n\n' + desc + '\nبر اساس همین توضیح، مستقیم و طبیعی به فارسی روان پاسخ بده، انگار خودت عکس را دیده‌ای؛ به «توضیح خودکار» یا «انگلیسی» اشاره نکن و نگو که تصویر را نمی‌بینی. اگر جزئیاتی معلوم نیست، کوتاه و صادقانه بگو.';
+}
+const DEFAULT_ASK = { image: 'این تصویر را به فارسی توضیح بده', video: 'این ویدیو را به فارسی توضیح بده' };
+async function sendMedia(md, text) {   // works in normal chat and in voice-call mode (the reply is spoken, then the mic re-arms)
+  text = (text || '').trim() || DEFAULT_ASK[md.kind];
+  if (call.on) {
+    const gen = call.gen; if (S) stopRec(true); stopSpeaking(); $('tapcont').classList.add('hidden'); setPhase('thinking');
+    const reply = await send(text, null, { fromCall: true, media: md });
+    if (!call.on || gen !== call.gen) return reply;
+    if (!reply) { pauseCall('پاسخی نیامد'); return null; }
+    setPhase('speaking'); speak(reply, { onDone: () => { if (call.on && gen === call.gen) callListen(false); } });
+    return reply;
+  }
+  return send(text, null, { media: md });
+}
+// composer sheet: preview + optional text, then send
+let pendingMedia = null;
+function openComposer(md) {
+  pendingMedia = md; $('cmp-prev').innerHTML = ''; $('cmp-prev').appendChild(mediaEl(md));
+  $('cmp-info').textContent = md.kind === 'video' ? `ویدیو ${fmtDur(md.duration)} — ${FA(md.images.length)} فریم برای تحلیل گرفته شد (خود ویدیو ذخیره نمی‌شود).` : `عکس ${FA(md.w)}×${FA(md.h)} — برای ارسال کوچک شد.`;
+  $('cmp-text').value = $('t').value.trim(); $('cmp-text').placeholder = DEFAULT_ASK[md.kind] + ' (پیش‌فرض)';
+  $('composer').classList.remove('hidden');
+}
+function closeComposer() { $('composer').classList.add('hidden'); pendingMedia = null; }
 async function send(text, llmText, opts = {}) {   // resolves to the reply text (or null)
   text = (text || '').trim(); if (!text || busy) return null;
   let reply = null; pendingCards = [];
   busy = true; $('send').disabled = true;
-  D.history.push(llmText ? { role: 'user', content: text, llm: llmText } : { role: 'user', content: text }); save('history'); addMsg('user', text);
+  const um = llmText ? { role: 'user', content: text, llm: llmText } : { role: 'user', content: text };
+  if (opts.media) um.media = opts.media;
+  D.history.push(um); save('history'); addMsg('user', text, um);
   const wait = addMsg('info', 'در حال فکر کردن…'); let planEl = null;
-  const hist = D.history.filter(m => m.role === 'user' || m.role === 'assistant').map((m, i, arr) => ({ role: m.role, content: m.llm && i >= arr.length - 3 ? m.llm : m.content }));
   try {
+    const direct = visionCapable(chain()[0]);   // user's own vision-capable key → send the real images; otherwise describe them on the phone
+    if (um.media && !direct && !um.media.caption) await describeMedia(um.media, msg => { wait.textContent = msg; });
+    save('history');
+    const hist = D.history.filter(m => m.role === 'user' || m.role === 'assistant').map((m, i, arr) => ({ role: m.role, content: m.media ? mediaContent(m, direct && m === um) : m.llm && i >= arr.length - 3 ? m.llm : m.content }));
+    wait.textContent = 'در حال فکر کردن…';
     let res;
     if (await pcAvailable()) { try { res = await pcChat(hist); } catch (e) { res = null; } }
     if (!res) {
@@ -365,7 +491,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
     reply = res.reply;
     if (!opts.fromCall && ttsOn()) speak(res.reply);   // voice-call mode speaks the reply itself
   } catch (e) {
-    wait.remove(); addMsg('error', 'پاسخی دریافت نشد: ' + e.message); $('t').value = text; D.history.pop(); save('history');
+    wait.remove(); addMsg('error', 'پاسخی دریافت نشد: ' + e.message + errTag(e.name)); if (!um.media) $('t').value = text; else lastFailedMedia = um; D.history.splice(D.history.indexOf(um), 1); save('history');
   }
   busy = false; $('send').disabled = false; refreshBadges();
   return reply;
@@ -374,7 +500,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
-const APP_VERSION = '1.4.0 (goosh-v11)';
+const APP_VERSION = '1.5.0 (goosh-v12)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -588,7 +714,7 @@ let voices = [], ttsUnlocked = false, ttsToken = 0, ttsBtn = null, ttsStopWait =
 const faVoiceMode = () => { const m = LS.get('faVoice', 'auto'); return ['auto', 'piper', 'system'].includes(m) ? m : 'auto'; };
 let piperFailed = null, ttsFa = null;
 const faEngine = () => { const m = faVoiceMode(); if (m === 'system') return 'system'; if (piperFailed && m === 'auto') return 'system'; if (m === 'piper') return 'piper'; return HAS_TTS && pickVoice(true) ? 'system' : 'piper'; };
-const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.4.0').then(m => (ttsFa = m));
+const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.5.0').then(m => (ttsFa = m));
 const AUD = new Audio(); AUD.preload = 'auto'; AUD.setAttribute('playsinline', ''); AUD.setAttribute('webkit-playsinline', '');
 const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
 let piperMsg = null;
@@ -940,7 +1066,21 @@ document.addEventListener('touchend', unlockTTS, { capture: true, passive: true 
 document.addEventListener('click', unlockTTS, { capture: true });
 setSpkUI(); setLangUI();
 let uploadTarget = 'chat';
-$('attach').onclick = () => { uploadTarget = 'chat'; $('fileinput').click(); };
+$('attach').onclick = () => { $('attachmenu').classList.toggle('hidden'); };
+const pickFrom = id => () => { $('attachmenu').classList.add('hidden'); unlockTTS(); $(id).click(); };
+$('am-photo').onclick = pickFrom('imginput'); $('am-video').onclick = pickFrom('vidinput');
+$('am-cam').onclick = pickFrom('caminput'); $('am-rec').onclick = pickFrom('recinput');
+$('am-file').onclick = () => { $('attachmenu').classList.add('hidden'); uploadTarget = 'chat'; $('fileinput').click(); };
+async function onMediaPicked(e, kind) {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  const w = addMsg('info', kind === 'video' ? 'در حال آماده‌سازی ویدیو…' : 'در حال آماده‌سازی عکس…');
+  try { const md = kind === 'video' ? await videoFromFile(f) : await imageFromFile(f); w.remove(); openComposer(md); }
+  catch (err) { w.remove(); addMsg('error', err.message + errTag(err.name)); }
+}
+$('imginput').onchange = e => onMediaPicked(e, 'image'); $('caminput').onchange = e => onMediaPicked(e, 'image');
+$('vidinput').onchange = e => onMediaPicked(e, 'video'); $('recinput').onchange = e => onMediaPicked(e, 'video');
+$('cmp-cancel').onclick = closeComposer;
+$('cmp-send').onclick = () => { const md = pendingMedia, t = $('cmp-text').value; if (!md) return; closeComposer(); $('t').value = ''; unlockTTS(); sendMedia(md, t); };
 $('nt-up').onclick = () => { uploadTarget = 'notes'; $('fileinput').click(); };
 $('fileinput').onchange = async e => {
   const f = e.target.files[0]; e.target.value = ''; if (!f) return;
@@ -969,7 +1109,7 @@ $('st-favoice-del').onclick = async () => { if (!confirm('مدل صدای فار
 async function forceUpdate() {   // unregister service workers + delete caches (data in IndexedDB is kept), then reload fresh
   $('upd-btn').disabled = true; $('upd-btn').textContent = '⏳ در حال به‌روزرسانی…';
   try { const regs = (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) ? await navigator.serviceWorker.getRegistrations() : []; await Promise.all(regs.map(r => r.unregister())); } catch (e) { }
-  try { const ks = await caches.keys(); await Promise.all(ks.filter(k => !k.startsWith('goosh-tts')).map(k => caches.delete(k))); } catch (e) { }   // keep the downloaded Persian voice
+  try { const ks = await caches.keys(); await Promise.all(ks.filter(k => /^goosh-v\d+$/.test(k)).map(k => caches.delete(k))); } catch (e) { }   // only app caches; keep the Persian voice + vision/Whisper models
   location.replace(location.pathname.replace(/[^/]*$/, '') + '?v=' + Date.now());
 }
 $('upd-btn').onclick = forceUpdate;
@@ -1001,4 +1141,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   }
   window.__ready = true;
 })();
-window.__app = { persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
+window.__app = { imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
