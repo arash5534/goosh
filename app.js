@@ -12,11 +12,11 @@ const DB = (() => {
   let p;
   const open = () => p || (p = new Promise((res, rej) => { const r = indexedDB.open('gooshe-masnooi', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }));
   const tx = async (m, f) => { const db = await open(); return new Promise((res, rej) => { const t = db.transaction('kv', m); const q = f(t.objectStore('kv')); t.oncomplete = () => res(q && q.result); t.onerror = () => rej(t.error); }); };
-  return { get: k => tx('readonly', s => s.get(k)), set: (k, v) => tx('readwrite', s => s.put(v, k)) };
+  return { get: k => tx('readonly', s => s.get(k)), set: (k, v) => tx('readwrite', s => s.put(v, k)), del: k => tx('readwrite', s => s.delete(k)) };
 })();
 const KEYS = ['history', 'notes', 'memory', 'tasks', 'agents', 'settings'];
-const D = { history: [], notes: [], memory: [], tasks: [], agents: [], settings: {} };
-const save = k => DB.set(k, D[k]).catch(e => console.warn(e));
+const D = { history: [], notes: [], memory: [], tasks: [], agents: [], settings: {}, convs: [] };
+const save = k => { if (k === 'history') persistConv(); return DB.set(k, D[k]).catch(e => console.warn(e)); };
 const setting = (k, def) => (D.settings[k] ?? def);
 const LS = {   // small device-local preferences (voice, permissions)
   get: (k, d) => { try { const v = localStorage.getItem('goosh.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
@@ -55,6 +55,9 @@ const PROVIDERS = {
   openrouter: { name: 'OpenRouter (کلید شخصی)', base: 'https://openrouter.ai/api/v1', model: 'meta-llama/llama-3.3-70b-instruct:free' },
   gemini: { name: 'Gemini (کلید شخصی)', base: 'https://generativelanguage.googleapis.com/v1beta/openai', model: 'gemini-2.0-flash' },
 };
+let genCtl = null;   // AbortController of the reply being generated (⏹ stop button)
+const stopErr = () => Object.assign(new Error('متوقف شد'), { stopped: true, name: 'stopped' });
+const checkStop = () => { if (genCtl && genCtl.signal.aborted) throw stopErr(); };
 const cooldown = {};   // provider -> time until which we skip it (free tiers rate-limit: Pollinations ≈ 1 request / 10–15 s)
 function chain() {
   const own = setting('prov', ''); const list = [];
@@ -73,13 +76,15 @@ async function postOnce(prov, messages, tools) {
   const body = { model: prov.model, messages };
   if (tools && tools.length) body.tools = tools;
   const ctl = new AbortController(); const tm = setTimeout(() => ctl.abort(), 75000);
+  const gs = genCtl && genCtl.signal, onStop = () => ctl.abort(); if (gs) { if (gs.aborted) throw stopErr(); gs.addEventListener('abort', onStop); }
   try {
     const r = await fetch(prov.base.replace(/\/$/, '') + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(body), signal: ctl.signal });
     if (!r.ok) { const e = new Error(prov.name + ' HTTP ' + r.status); e.status = r.status; throw e; }
     const d = await r.json(); const m = d.choices && d.choices[0] && d.choices[0].message;
     if (!m) throw new Error(prov.name + ': پاسخ نامعتبر');
     return m;
-  } finally { clearTimeout(tm); }
+  } catch (e) { if (gs && gs.aborted) throw stopErr(); throw e; }
+  finally { clearTimeout(tm); if (gs) gs.removeEventListener('abort', onStop); }
 }
 async function callBrain(messages, tools, onWait) {
   const errs = [];
@@ -87,9 +92,10 @@ async function callBrain(messages, tools, onWait) {
     let tried = 0, limited = 0;
     for (const prov of chain()) {
       if ((cooldown[prov.id] || 0) > Date.now()) { limited++; continue; }
-      tried++;
+      tried++; checkStop();
       try { return { msg: await postOnce(prov, messages, tools), name: prov.name }; }
       catch (e) {
+        if (e.stopped) throw e;
         errs.push(e.message); if (e.status === 402 || e.status === 429) limited++;
         if (e.status === 402) cooldown[prov.id] = Date.now() + 2 * 60000;   // keyless tier refused (Pollinations POST now answers 402) → skip it for a while
         else if (e.status === 429) cooldown[prov.id] = Date.now() + 30000;
@@ -97,7 +103,7 @@ async function callBrain(messages, tools, onWait) {
       }
     }
     if (limited >= chain().length) { const e = new Error(errs.slice(-3).join(' | ') || 'سرویس‌های رایگان محدود شده‌اند'); e.rateLimited = true; throw e; }   // every provider quota-limited → go to the keyless GET fallback now
-    onWait && onWait(); await sleep(4000 * (cycle + 1));
+    onWait && onWait(); await sleep(4000 * (cycle + 1)); checkStop();
   }
   throw new Error(errs.slice(-3).join(' | ') || 'سرویس‌های آنلاین پاسخ ندادند');
 }
@@ -105,7 +111,8 @@ async function fallbackGet(messages) {   // Pollinations simple GET endpoint (no
   const sys = messages.find(m => m.role === 'system')?.content || '';
   const convo = flatten(messages).filter(m => m.role === 'user' || m.role === 'assistant').slice(-6).map(m => (m.role === 'user' ? 'کاربر: ' : 'دستیار: ') + m.content).join('\n');
   const url = 'https://text.pollinations.ai/' + encodeURIComponent(convo.slice(-3500) + '\nدستیار:') + '?system=' + encodeURIComponent(sys.slice(0, 1500));
-  const r = await fetch(url); if (!r.ok) throw new Error('HTTP ' + r.status); const t = (await r.text()).trim();
+  checkStop(); let r; try { r = await fetch(url, genCtl ? { signal: genCtl.signal } : {}); } catch (e) { if (genCtl && genCtl.signal.aborted) throw stopErr(); throw e; }
+  if (!r.ok) throw new Error('HTTP ' + r.status); const t = (await r.text()).trim();
   if (!t) throw new Error('empty'); return t;
 }
 
@@ -249,9 +256,9 @@ async function agent(history, ui = {}) {
   const wait = () => ui.wait && ui.wait();
   try {
     for (let round = 0; round < 8; round++) {
-      let res;
+      checkStop(); let res;
       try { res = await callBrain(messages, noTools ? null : tools, wait); }
-      catch (e) { if (round === 0 && !noTools && !e.rateLimited) { noTools = true; res = await callBrain(messages, null, wait); } else throw e; }
+      catch (e) { if (e.stopped) throw e; if (round === 0 && !noTools && !e.rateLimited) { noTools = true; res = await callBrain(messages, null, wait); } else throw e; }
       const msg = res.msg; used.add(res.name);
       let calls = (msg.tool_calls || []).filter(c => c && c.function);
       if (!calls.length && msg.content) {   // some models print tool calls as text
@@ -275,8 +282,9 @@ async function agent(history, ui = {}) {
     }
     throw new Error('مراحل زیاد شد');
   } catch (e) {
+    if (e.stopped) throw e;
     const fh = [{ role: 'system', content: systemPrompt() }, ...history.slice(-8)];
-    let reply = await fallbackGet(fh).catch(() => { throw e; });
+    let reply = await fallbackGet(fh).catch(e2 => { throw e2.stopped ? e2 : e; });
     if (wantFa && !persianOk(reply)) reply = await fallbackGet([...fh, { role: 'assistant', content: reply }, { role: 'user', content: 'پاسخ را فقط به فارسی بنویس.' }]).catch(() => reply);
     return { reply, brain: 'Pollinations پشتیبان (بدون ابزار)', note: e.message };
   }
@@ -299,13 +307,16 @@ function addMsg(role, text, extra = {}) {
     const b = document.createElement('div'); b.innerHTML = md(text); d.appendChild(b);
     const m = document.createElement('div'); m.className = 'meta';
     m.innerHTML = extra.brain ? `<span>🧠 ${esc(extra.brain)}</span>` : '';
-    const sp = document.createElement('button'); sp.textContent = '🔊'; sp.title = 'خواندن با صدا'; sp.onclick = () => { unlockTTS(); if (ttsBtn === sp) return stopSpeaking(); speak(text, { btn: sp, manual: true }); }; m.appendChild(sp);
-    const cp = document.createElement('button'); cp.textContent = '📋'; cp.onclick = () => navigator.clipboard?.writeText(text); m.appendChild(cp);
+    const sp = document.createElement('button'); sp.textContent = '🔊'; sp.title = T('readAloud'); sp.className = 'act-read'; sp.onclick = () => { unlockTTS(); if (ttsBtn === sp) return stopSpeaking(); speak(text, { btn: sp, manual: true }); }; m.appendChild(sp);
+    const cp = document.createElement('button'); cp.textContent = '📋'; cp.title = T('copy'); cp.className = 'act-copy'; cp.onclick = () => copyText(text, cp); m.appendChild(cp);
+    const sh = document.createElement('button'); sh.textContent = '📤'; sh.title = T('share'); sh.className = 'act-share'; sh.onclick = () => shareText(text, sh); m.appendChild(sh);
     d.appendChild(m);
   } else if (extra.media) {
     d.appendChild(mediaEl(extra.media));
     const t = document.createElement('div'); t.textContent = text; d.appendChild(t);
   } else d.textContent = text;
+  if (role === 'user' && extra.queued) d.classList.add('queued');
+  if (role === 'user' || role === 'assistant') d.__m = extra;
   $('log').appendChild(d); $('log').scrollTop = $('log').scrollHeight; return d;
 }
 function mediaEl(md) {   // thumbnail (+ ▶ and duration for videos); tap to enlarge
@@ -352,9 +363,61 @@ function cardEl(c) {   // draft / file card: every action here is a button the U
 function takeCards() { const c = pendingCards; pendingCards = []; return c; }
 function renderChat() {
   $('log').innerHTML = '';
-  if (!D.history.length) addMsg('info', 'سلام! هر سؤالی دارید بپرسید. می‌توانید بگویید: «هوای تهران چطوره؟»، «دربارهٔ حافظ از ویکی‌پدیا بگو»، «یادت باشه که…»، «فردا ساعت ۹ یادم بنداز…» یا فایل بفرستید (📎).');
-  D.history.forEach(m => { if (m.role === 'card') $('log').appendChild(cardEl(m)); else addMsg(m.role, m.content, m); });
+  if (!D.history.length) { addMsg('info', T('welcome')); $('log').appendChild(chipsEl()); }
+  D.history.forEach((m, i) => { const el = m.role === 'card' ? $('log').appendChild(cardEl(m)) : addMsg(m.role, m.content, m); el.dataset.i = i; });
+  refreshMsgActions(); updateEditBar();
 }
+// ---- quick prompts on an empty chat
+function chipsEl() {
+  const w = document.createElement('div'); w.className = 'chips';
+  T('chips').forEach(([label, prompt]) => { const b = document.createElement('button'); b.textContent = label; b.onclick = () => { $('t').value = prompt; growInput(); $('t').focus(); const n = prompt.length; try { $('t').setSelectionRange(n, n); } catch (e) { } }; w.appendChild(b); });
+  return w;
+}
+// ---- message actions: copy, share, read aloud (every reply); regenerate (last reply); edit & resend (last user message)
+function flash(btn, txt) { if (!btn) return; const o = btn.textContent; btn.textContent = txt; setTimeout(() => { btn.textContent = o; }, 1200); }
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); flash(btn, '✓'); }
+  catch (e) { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); try { document.execCommand('copy'); flash(btn, '✓'); } catch (e2) { } ta.remove(); }
+}
+function shareText(text, btn) { if (navigator.share) navigator.share({ text }).catch(() => { }); else copyText(text, btn); }
+const chatMsgs = () => D.history.filter(m => m.role === 'user' || m.role === 'assistant');
+function refreshMsgActions() {
+  document.querySelectorAll('#log .act-last').forEach(b => b.remove());
+  const msgs = chatMsgs(), lastA = [...msgs].reverse().find(m => m.role === 'assistant'), lastU = [...msgs].reverse().find(m => m.role === 'user');
+  document.querySelectorAll('#log .msg.user, #log .msg.assistant').forEach(el => {
+    if (el.__m === lastA && lastA === msgs[msgs.length - 1]) {
+      const b = document.createElement('button'); b.className = 'act-last act-regen'; b.textContent = '🔄'; b.title = T('regen'); b.onclick = () => regenerate(lastA);
+      el.querySelector('.meta')?.appendChild(b);
+    }
+    if (el.__m === lastU) {
+      const r = document.createElement('div'); r.className = 'act-last uact';
+      const e = document.createElement('button'); e.className = 'act-edit'; e.textContent = '✏️ ' + T('edit'); e.onclick = () => editLast(lastU);
+      const c = document.createElement('button'); c.className = 'act-ucopy'; c.textContent = '📋'; c.title = T('copy'); c.onclick = () => copyText(lastU.content, c);
+      r.append(e, c); el.after(r);
+    }
+  });
+}
+function regenerate(am) {
+  if (busy) return;
+  const i = D.history.indexOf(am); if (i < 0) return;
+  let ui = i - 1; while (ui >= 0 && D.history[ui].role !== 'user') ui--; if (ui < 0) return;
+  D.history.splice(i); save('history'); renderChat();
+  send(null, null, { resend: D.history[ui] });
+}
+let editStash = null;   // messages removed by "edit" (restored if the edit is cancelled)
+function editLast(um) {
+  if (busy) return;
+  const i = D.history.indexOf(um); if (i < 0) return;
+  editStash = { at: i, removed: D.history.slice(i) };
+  D.history.splice(i); save('history'); renderChat();
+  if (um.media) { openComposer({ ...um.media }); $('cmp-text').value = um.content; }
+  else { $('t').value = um.content; growInput(); $('t').focus(); }
+  updateEditBar();
+}
+function cancelEdit() {
+  if (!editStash) return; D.history.splice(editStash.at, 0, ...editStash.removed); editStash = null; save('history'); $('t').value = ''; growInput(); renderChat();
+}
+function updateEditBar() { $('editbar') && $('editbar').classList.toggle('hidden', !editStash); }
 const TOOL_FA = { get_datetime: 'ساعت', wikipedia: 'ویکی‌پدیا', get_weather: 'آب‌وهوا', web_search: 'جستجوی وب', read_webpage: 'خواندن صفحه', get_news: 'اخبار', currency_rate: 'نرخ ارز', save_note: 'ذخیرهٔ یادداشت', read_note: 'خواندن یادداشت', list_notes: 'یادداشت‌ها', remember: 'به خاطر سپردن', list_memory: 'حافظه', forget: 'فراموش کردن', add_task: 'افزودن کار', list_tasks: 'کارها', complete_task: 'انجام کار', make_plan: 'برنامه‌ریزی' };
 let busy = false, lastFailedMedia = null;
 // ---- photos & videos -------------------------------------------------------------------------------
@@ -410,7 +473,7 @@ async function videoFromFile(file, n = VIDEO_FRAMES) {   // N evenly spaced fram
   finally { v.removeAttribute('src'); try { v.load(); } catch (e) { } v.remove(); URL.revokeObjectURL(url); }
 }
 let visionMod = null;
-const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.5.0').then(m => (visionMod = m));
+const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.6.0').then(m => (visionMod = m));
 async function describeMedia(md, status) {   // on-device captions (Florence-2) → stored with the message
   const V = await loadVision();
   if (!(await V.isDownloaded())) status('دانلود مدل بینایی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(V.APPROX_BYTES / 1e6)) + ' مگابایت)… ۰٪');
@@ -425,7 +488,7 @@ async function describeMedia(md, status) {   // on-device captions (Florence-2) 
 function mediaContent(m, direct) {   // what the model receives for a message with a photo/video
   const md = m.media, text = m.content;
   if (direct) {   // vision-capable provider (user's own key): real image parts
-    const note = md.kind === 'video' ? `\n(These are ${md.images.length} frames, in order, from a video of ${Math.round(md.duration)} seconds, taken at seconds ${md.times.join(', ')}.)` : '';
+    const note = (md.kind === 'video' ? `\n(These are ${md.images.length} frames, in order, from a video of ${Math.round(md.duration)} seconds, taken at seconds ${md.times.join(', ')}.)` : '') + (md.ocr ? `\n(Text found in the image by on-device OCR: "${md.ocr}")` : '');
     return [{ type: 'text', text: text + note }, ...md.images.map(u => ({ type: 'image_url', image_url: { url: u } }))];
   }
   const caps = md.caption || [];
@@ -450,30 +513,43 @@ async function sendMedia(md, text) {   // works in normal chat and in voice-call
 // composer sheet: preview + optional text, then send
 let pendingMedia = null;
 function openComposer(md) {
-  pendingMedia = md; $('cmp-prev').innerHTML = ''; $('cmp-prev').appendChild(mediaEl(md));
-  $('cmp-info').textContent = md.kind === 'video' ? `ویدیو ${fmtDur(md.duration)} — ${FA(md.images.length)} فریم برای تحلیل گرفته شد (خود ویدیو ذخیره نمی‌شود).` : `عکس ${FA(md.w)}×${FA(md.h)} — برای ارسال کوچک شد.`;
+  pendingMedia = md; $('cropper').classList.add('hidden'); $('cmp-ocrout').classList.add('hidden'); $('cmp-ocrout').innerHTML = ''; refreshComposer();
   $('cmp-text').value = $('t').value.trim(); $('cmp-text').placeholder = DEFAULT_ASK[md.kind] + ' (پیش‌فرض)';
   $('composer').classList.remove('hidden');
 }
-function closeComposer() { $('composer').classList.add('hidden'); pendingMedia = null; }
+function closeComposer() { $('composer').classList.add('hidden'); $('cropper').classList.add('hidden'); pendingMedia = null; }
 async function send(text, llmText, opts = {}) {   // resolves to the reply text (or null)
-  text = (text || '').trim(); if (!text || busy) return null;
+  const re = opts.resend || null;   // regenerate / edited / queued message that is already in the history
+  text = re ? re.content : (text || '').trim(); if (!text || busy) return null;
   let reply = null; pendingCards = [];
-  busy = true; $('send').disabled = true;
-  const um = llmText ? { role: 'user', content: text, llm: llmText } : { role: 'user', content: text };
-  if (opts.media) um.media = opts.media;
-  D.history.push(um); save('history'); addMsg('user', text, um);
-  const wait = addMsg('info', 'در حال فکر کردن…'); let planEl = null;
+  const um = re || (llmText ? { role: 'user', content: text, llm: llmText } : { role: 'user', content: text });
+  if (!re) { um.t = nowISO(); if (opts.media) um.media = opts.media; }
+  if (editStash && !re) { editStash = null; updateEditBar(); }
+  $('log').querySelector('.chips')?.remove();
+  if (!navigator.onLine && !(await pcAvailable())) {   // offline: keep the message and send it automatically when the connection is back
+    um.queued = true;
+    if (!re) { D.history.push(um); addMsg('user', text, um); }
+    save('history'); addMsg('info', T('offlineQueued')); refreshMsgActions(); refreshBadges();
+    return null;
+  }
+  delete um.queued;
+  busy = true; $('send').disabled = true; genCtl = new AbortController(); $('stopgen').classList.remove('hidden');
+  if (!re) { D.history.push(um); save('history'); addMsg('user', text, um); }
+  else { save('history'); const el = [...document.querySelectorAll('#log .msg.user')].find(x => x.__m === um); if (el) el.classList.remove('queued'); }
+  document.querySelectorAll('#log .act-last').forEach(b => b.remove());
+  const wait = addMsg('info', T('thinking')); let planEl = null;
   try {
     const direct = visionCapable(chain()[0]);   // user's own vision-capable key → send the real images; otherwise describe them on the phone
+    if (um.media && um.media.kind === 'image' && !um.media.ocr && /متن|نوشته|بخوان|ocr|\btext\b/i.test(text)) { try { um.media.ocr = await ocrImage(um.media.images[0], msg => { wait.textContent = msg; }); } catch (e) { } }
+    checkStop();
     if (um.media && !direct && !um.media.caption) await describeMedia(um.media, msg => { wait.textContent = msg; });
-    save('history');
-    const hist = D.history.filter(m => m.role === 'user' || m.role === 'assistant').map((m, i, arr) => ({ role: m.role, content: m.media ? mediaContent(m, direct && m === um) : m.llm && i >= arr.length - 3 ? m.llm : m.content }));
-    wait.textContent = 'در حال فکر کردن…';
+    checkStop(); save('history');
+    const upto = D.history.indexOf(um);
+    const hist = D.history.slice(0, upto + 1).filter(m => m.role === 'user' || m.role === 'assistant').map((m, i, arr) => ({ role: m.role, content: m.media ? mediaContent(m, direct && m === um) : m.llm && i >= arr.length - 3 ? m.llm : m.content }));
+    wait.textContent = T('thinking');
     let res;
     if (await pcAvailable()) { try { res = await pcChat(hist); } catch (e) { res = null; } }
     if (!res) {
-      if (!navigator.onLine) throw new Error('اینترنت قطع است. پیام شما ذخیره شد؛ وقتی وصل شدید دوباره «ارسال» را بزنید.');
       res = await agent(hist, {
         tool: (name, args, steps) => {
           wait.textContent = 'در حال انجام: ' + (TOOL_FA[name] || name) + '…';
@@ -483,24 +559,29 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
         done: steps => { if (planEl) planEl.innerHTML = '<b>برنامهٔ کار:</b>' + steps.map(s => `<div>✅ ${esc(s.text)}</div>`).join(''); },
       });
     }
-    wait.remove();
-    D.history.push({ role: 'assistant', content: res.reply, brain: res.brain }); addMsg('assistant', res.reply, res);
+    checkStop(); wait.remove();
+    const am = { role: 'assistant', content: res.reply, brain: res.brain, t: nowISO() }; D.history.push(am); addMsg('assistant', res.reply, am);
     takeCards().forEach(c => { const m = { role: 'card', ...c }; D.history.push(m); $('log').appendChild(cardEl(m)); }); $('log').scrollTop = $('log').scrollHeight;
     save('history');
     $('brainbadge').textContent = 'مغز: ' + res.brain;
     reply = res.reply;
     if (!opts.fromCall && ttsOn()) speak(res.reply);   // voice-call mode speaks the reply itself
   } catch (e) {
-    wait.remove(); addMsg('error', 'پاسخی دریافت نشد: ' + e.message + errTag(e.name)); if (!um.media) $('t').value = text; else lastFailedMedia = um; D.history.splice(D.history.indexOf(um), 1); save('history');
+    wait.remove();
+    if (e.stopped) addMsg('info', T('stopped')); else addMsg('error', 'پاسخی دریافت نشد: ' + e.message + errTag(e.name));
+    if (!um.media) { $('t').value = text; growInput(); } else lastFailedMedia = um;
+    const k = D.history.indexOf(um); if (k >= 0) D.history.splice(k, 1); save('history');
+    document.querySelectorAll('#log .msg.user').forEach(x => { if (x.__m === um) x.remove(); });
   }
-  busy = false; $('send').disabled = false; refreshBadges();
+  busy = false; $('send').disabled = false; genCtl = null; $('stopgen').classList.add('hidden'); refreshBadges(); refreshMsgActions();
+  if (reply) setTimeout(flushOutbox, 0);   // more queued messages waiting?
   return reply;
 }
 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
-const APP_VERSION = '1.5.0 (goosh-v12)';
+const APP_VERSION = '1.6.0 (goosh-v13)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -618,6 +699,7 @@ function singleDone(s) {
     if (e) markSrBlocked(code); return dictationFallback(code);
   }
   if (e && e !== 'aborted') return voiceErr(e);
+  if (s.text && voiceCommand(s.text, false)) { $('t').value = s.prefix || ''; growInput(); return; }   // local Persian command (not sent to the model)
   const text = $('t').value.trim();
   if (s.text && text && autoSend() && !busy) { $('t').value = ''; growInput(); send(text); }
 }
@@ -636,14 +718,14 @@ function startCall() {
   if (S) stopRec(true);
   if (wRec) wRec.stop();
   call.on = true; call.noSpeech = 0; call.gen++;
-  $('callbtn').textContent = '⏹ پایان تماس'; $('callbtn').classList.add('oncall');
+  $('callbtn').textContent = T('endCall'); $('callbtn').classList.add('oncall');
   callListen(true);                                       // first start: synchronously inside the tap
 }
 function stopCall(msg) {
   if (!call.on) return;
-  call.on = false; call.gen++;
+  call.on = false; call.gen++; if (busy && genCtl) genCtl.abort();
   $('tapcont').classList.add('hidden'); stopRec(true); stopSpeaking(); setPhase('');
-  $('callbtn').textContent = '📞 تماس صوتی'; $('callbtn').classList.remove('oncall');
+  $('callbtn').textContent = T('call'); $('callbtn').classList.remove('oncall');
   if (msg) addMsg('info', msg);
 }
 function pauseCall(why, code) { setPhase('paused'); $('tapcont').textContent = '👆 برای ادامه ضربه بزنید' + (why ? ' — ' + why : '') + (code ? ' [' + code + ']' : ''); $('tapcont').classList.remove('hidden'); }
@@ -670,10 +752,12 @@ function callHeard(s, gen) {
     if (++call.noSpeech >= MAX_NOSPEECH) return pauseCall('صدایی نشنیدم');
     return callListen(false);
   }
-  call.noSpeech = 0; $('t').value = ''; growInput(); setPhase('thinking');
+  call.noSpeech = 0; $('t').value = ''; growInput();
+  if (voiceCommand(text, true)) return;   // «ساکت شو»، «تماس رو قطع کن»، «دوباره بگو»، «یادداشت کن …»، «یادم بنداز …»
+  setPhase('thinking');
   send(text, null, { fromCall: true }).then(reply => {
     if (!call.on || gen !== call.gen) return;
-    if (!reply) return stopCall('پاسخی دریافت نشد؛ تماس پایان یافت.');
+    if (!reply) return stopCall(navigator.onLine ? 'پاسخی دریافت نشد؛ تماس پایان یافت.' : T('offlineCall'));
     setPhase('speaking');
     speak(reply, { onDone: () => { if (call.on && gen === call.gen) callListen(false); } });   // mic opens only after the last chunk ends
   });
@@ -702,19 +786,21 @@ async function whisperRecord() {
       const audio = (await ac.decodeAudioData(buf)).getChannelData(0);
       const out = await asr(audio, { language: sttLang() === 'en-US' ? 'english' : 'persian', task: 'transcribe' });
       w.remove(); const txt = out.text.trim();
-      if (!txt) addMsg('info', 'متوجه نشدم.'); else if (autoSend()) send(txt); else { $('t').value = txt; growInput(); }
+      if (!txt) addMsg('info', 'متوجه نشدم.'); else if (voiceCommand(txt, false)) { } else if (autoSend()) send(txt); else { $('t').value = txt; growInput(); }
     } catch (e) { w.remove(); addMsg('error', 'Whisper: ' + e.message + errTag(e.name)); }
   };
   wRec.start(); setMicUI(true); setTimeout(() => wRec && wRec.stop(), 30000);
 }
 
 // ---- text-to-speech
+const ttsRate = () => { const r = +LS.get('ttsRate', 1); return isFinite(r) && r ? Math.min(1.5, Math.max(0.7, r)) : 1; };   // 0.7–1.5×
+const ttsVol = () => { const v = +LS.get('ttsVol', 1); return isFinite(v) ? Math.min(1, Math.max(0.1, v)) : 1; };
 let voices = [], ttsUnlocked = false, ttsToken = 0, ttsBtn = null, ttsStopWait = null;
 // Persian voice: 'auto' (iOS Persian voice if installed, else on-device Piper), 'piper', or 'system'
 const faVoiceMode = () => { const m = LS.get('faVoice', 'auto'); return ['auto', 'piper', 'system'].includes(m) ? m : 'auto'; };
 let piperFailed = null, ttsFa = null;
 const faEngine = () => { const m = faVoiceMode(); if (m === 'system') return 'system'; if (piperFailed && m === 'auto') return 'system'; if (m === 'piper') return 'piper'; return HAS_TTS && pickVoice(true) ? 'system' : 'piper'; };
-const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.5.0').then(m => (ttsFa = m));
+const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.6.0').then(m => (ttsFa = m));
 const AUD = new Audio(); AUD.preload = 'auto'; AUD.setAttribute('playsinline', ''); AUD.setAttribute('webkit-playsinline', '');
 const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
 let piperMsg = null;
@@ -787,6 +873,7 @@ function playSystemChunk(p, my) {   // one speechSynthesis utterance → Promise
     const fa = isFaText(p), v = pickVoice(fa);
     const u = new SpeechSynthesisUtterance(p);
     if (v) { u.voice = v; u.lang = v.lang; } else if (!fa) u.lang = 'en-US'; else if (!voices.length) u.lang = 'fa-IR';
+    u.rate = ttsRate(); u.volume = ttsVol();
     let fired = false; const t0 = Date.now();
     const fin = () => { if (fired) return; fired = true; clearInterval(wd); res(); };
     const wd = setInterval(() => {   // watchdog: iOS occasionally never fires onend
@@ -800,11 +887,12 @@ function playSystemChunk(p, my) {   // one speechSynthesis utterance → Promise
 function playPcm(pcm, rate, my) {   // Piper audio through the (tap-unlocked) <audio> element → Promise on end
   return new Promise(res => {
     if (my !== ttsToken) return res();
+    const vol = ttsVol(); if (vol < 0.999) { const q = new Float32Array(pcm.length); for (let i = 0; i < pcm.length; i++) q[i] = pcm[i] * vol; pcm = q; }   // iOS ignores <audio>.volume → scale the samples
     const url = URL.createObjectURL(ttsFa.wav(pcm, rate)); let done = false, wd = null;
     const fin = () => { if (done) return; done = true; clearTimeout(wd); AUD.onended = AUD.onerror = null; if (ttsStopWait === fin) ttsStopWait = null; setTimeout(() => URL.revokeObjectURL(url), 1000); res(); };
     ttsStopWait = fin;
     AUD.onended = fin; AUD.onerror = fin;
-    AUD.src = url;
+    AUD.src = url; try { AUD.playbackRate = 1; } catch (e) { }
     wd = setTimeout(fin, (pcm.length / rate) * 1000 + 4000);   // safety net if 'ended' never fires
     const pr = AUD.play(); if (pr && pr.catch) pr.catch(e => { if (my === ttsToken) addMsg('info', 'پخش صدا ممکن نشد؛ یک‌بار روی صفحه بزنید و دوباره امتحان کنید.' + errTag(e.name)); fin(); });
   });
@@ -823,7 +911,7 @@ async function speak(text, opts = {}) {
   if (engine === 'system' && needFa && HAS_TTS && !pickVoice(true) && setting('pcOn', false) && setting('pcBase', '') && await pcAvailable()) {   // existing PC voice, if paired
     try {
       const r = await fetch(setting('pcBase') + '/api/tts', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-PIN': setting('pin', '') }, body: JSON.stringify({ text: clean, lang: 'fa' }) });
-      AUD.src = URL.createObjectURL(await r.blob()); AUD.onended = () => { setTtsBtn(null); done(); }; await AUD.play(); return;
+      AUD.src = URL.createObjectURL(await r.blob()); try { AUD.playbackRate = ttsRate(); AUD.preservesPitch = true; AUD.volume = ttsVol(); } catch (e) { } AUD.onended = () => { setTtsBtn(null); done(); }; await AUD.play(); return;
     } catch (e) { }
   }
   if (engine === 'system' && !HAS_TTS) { setTtsBtn(null); if (opts.manual) addMsg('info', 'خواندن با صدا در این مرورگر پشتیبانی نمی‌شود.'); return done(); }
@@ -835,7 +923,7 @@ async function speak(text, opts = {}) {
   playSystemChunk.manual = !!opts.manual;
   // Persian chunks → Piper (synthesis of the next chunk overlaps playback of the current one); others → speechSynthesis
   const items = parts.map(p => ({ p, piper: engine === 'piper' && isFaText(p) }));
-  const synth = i => { const it = items[i]; if (it && it.piper && !it.pcm) it.pcm = ttsFa.synth(it.p).catch(e => { it.err = e; return null; }); };
+  const synth = i => { const it = items[i]; if (it && it.piper && !it.pcm) it.pcm = ttsFa.synth(it.p, { rate: ttsRate() }).catch(e => { it.err = e; return null; }); };
   for (let i = 0; i < items.length; i++) {
     if (my !== ttsToken) return;
     const it = items[i];
@@ -851,6 +939,305 @@ async function speak(text, opts = {}) {
 }
 function setSpkUI() { $('spk').textContent = ttsOn() ? '🔊' : '🔇'; $('spk').title = ttsOn() ? 'خواندن خودکار پاسخ‌ها: روشن' : 'خواندن خودکار پاسخ‌ها: خاموش'; if ($('st-tts')) $('st-tts').checked = ttsOn(); }
 function setLangUI() { $('sttlang').textContent = sttLang() === 'en-US' ? 'EN' : 'فا'; $('sttlang').title = 'زبان گفتار: ' + (sttLang() === 'en-US' ? 'انگلیسی' : 'فارسی'); }
+
+// ------------------------------------------------------------------ 1.6.0: voice commands, conversations, export, appearance, OCR, offline queue
+// ---- local Persian voice commands (matched on the phone; never sent to the model)
+const faNorm = s => String(s || '').replace(/ي/g, 'ی').replace(/ك/g, 'ک').replace(/[\u064B-\u0652\u0670]/g, '').replace(/\u200c/g, ' ');
+const faCmd = s => faNorm(s).replace(/[.!؟?،,؛;:«»"'()\-–]/g, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+const VC_STOP = /^(ساکت شو|ساکت باش|ساکت|بسه|بس کن|بسه دیگه|بسه بسه|کافیه|کافی است|stop)$/;
+const VC_HANG = /^(تماس ?(رو|را|و)? ?قطع کن|تماسو قطع کن|قطع کن تماس ?(رو|را)?|قطع تماس|تماس رو تموم کن|تماس را تمام کن|قطع کن)$/;
+const VC_REP = /^(دوباره بگو|یه بار دیگه بگو|یک بار دیگه بگو|یک بار دیگر بگو|یه دفعه دیگه بگو|تکرار کن|دوباره|تکرار)$/;
+const VC_NOTE = /^\s*یادداشت ?کن[\s:،,.\-]*([\s\S]*)$/;
+const VC_REM = /^\s*(یادم بنداز|یادم بیار|یادآوری کن|به من یادآوری کن|بهم یادآوری کن)[\s:،,.\-]*([\s\S]*)$/;
+const NUMW = { 'یک': 1, 'یه': 1, 'دو': 2, 'سه': 3, 'چهار': 4, 'پنج': 5, 'شش': 6, 'شیش': 6, 'هفت': 7, 'هشت': 8, 'نه': 9, 'ده': 10, 'یازده': 11, 'دوازده': 12, 'پونزده': 15, 'پانزده': 15, 'بیست': 20, 'سی': 30, 'چهل': 40, 'پنجاه': 50 };
+const NUM_RE = '(\\d{1,2}|' + Object.keys(NUMW).sort((a, b) => b.length - a.length).join('|') + ')';
+const toNum = w => /^\d+$/.test(w) ? +w : NUMW[w];
+const localDT = d => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + 'T' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+function parseFaReminder(raw, now = new Date()) {   // «فردا ساعت ۹ به مامان زنگ بزنم» → { title, due: Date|null, repeat }
+  let t = ' ' + faNorm(raw).replace(/[۰-۹]/g, d => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, d => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/\s+/g, ' ') + ' ';
+  const cut = re => { const m = t.match(re); if (m) t = t.replace(m[0], ' '); return m; };
+  let due = null, repeat = 'none';
+  if (cut(/ هر روز /)) repeat = 'daily'; else if (cut(/ هر هفته /)) repeat = 'weekly';
+  const rel = cut(new RegExp(' (نیم|' + NUM_RE + ') ?(دقیقه|ساعت) (دیگه|دیگر|بعد) '));
+  if (rel) { const n = rel[1] === 'نیم' ? 0.5 : toNum(rel[2]); const ms = rel[3] === 'دقیقه' ? n * 60000 : n * 3600000; if (n) due = new Date(now.getTime() + ms); if (rel[1] === 'نیم' && rel[3] === 'دقیقه') due = null; }
+  if (!due) {
+    let day = 0, dayWord = false;
+    if (cut(/ پس ?فردا /)) { day = 2; dayWord = true; } else if (cut(/ فردا /)) { day = 1; dayWord = true; } else if (cut(/ امروز /)) dayWord = true;
+    const tonight = !!cut(/ امشب /);
+    const hm = cut(new RegExp(' ساعت ' + NUM_RE + '(?:[:٫.](\\d{2}))?( و نیم| و ربع)? '));
+    const part = cut(/ (صبح|ظهر|بعد ?از ?ظهر|عصر|شب) /);
+    if (hm || dayWord || tonight) {
+      const d = new Date(now); d.setSeconds(0, 0); d.setDate(d.getDate() + day);
+      if (hm) {
+        let h = toNum(hm[1]), mi = hm[2] ? +hm[2] : hm[3] === ' و نیم' ? 30 : hm[3] === ' و ربع' ? 15 : 0;
+        const pp = part ? part[1].replace(/\s/g, '') : tonight ? 'شب' : '';
+        if (/بعدازظهر|عصر/.test(pp) && h < 12) h += 12; else if (pp === 'ظهر' && h < 5) h += 12; else if (pp === 'شب') { if (h === 12) h = 0; else if (h >= 5 && h < 12) h += 12; }
+        else if (!pp && h >= 1 && h <= 6) h += 12;   // «ساعت ۵» without صبح → 17:00
+        d.setHours(h, mi);
+        if (!dayWord && d <= now) { if (!pp && h < 12) d.setHours(h + 12); if (d <= now) d.setDate(d.getDate() + 1); }
+      } else d.setHours(tonight ? 20 : part && /عصر|بعد/.test(part[1]) ? 17 : part && part[1] === 'شب' ? 20 : part && part[1] === 'ظهر' ? 12 : 9, 0);
+      due = d;
+    }
+  }
+  const title = t.replace(/^\s*(که|تا)\s+/, '').replace(/\s+/g, ' ').trim();
+  return { title, due, repeat };
+}
+function voiceCommand(raw, inCall) {   // → true when the phrase was a local command and has been handled
+  const c = faCmd(raw); if (!c || c.length > 400) return false;
+  const gen = call.gen;
+  const next = () => { if (inCall && call.on && gen === call.gen) callListen(false); };
+  const reply = (msg, spoken) => { addMsg('info', msg); if (inCall) { setPhase('speaking'); speak(spoken || msg, { onDone: next }); } else if (ttsOn()) speak(spoken || msg); };
+  if (VC_STOP.test(c)) { stopSpeaking(); addMsg('info', '🔇 «' + raw.trim() + '» — ' + T('vcStopped')); next(); return true; }
+  if (VC_HANG.test(c)) { if (inCall || call.on) stopCall('📞 ' + T('vcHang')); else addMsg('info', T('vcNoCall')); return true; }
+  if (VC_REP.test(c)) {
+    const last = [...D.history].reverse().find(m => m.role === 'assistant');
+    if (!last) { reply(T('vcNothing')); return true; }
+    addMsg('info', '🔁 ' + T('vcRepeat')); if (inCall) setPhase('speaking'); speak(last.content, { manual: true, onDone: next }); return true;
+  }
+  const light = faNorm(raw).trim(); let m;
+  if ((m = light.match(VC_NOTE))) {
+    const body = m[1].trim(); if (!body) { reply(T('vcNoteEmpty')); return true; }
+    const title = '🎙 ' + body.replace(/\s+/g, ' ').slice(0, 40); TOOLS.save_note.f({ title, content: body });
+    reply('📝 ' + T('vcNoted') + ' «' + body.slice(0, 80) + '»', T('vcNoted')); return true;
+  }
+  if ((m = light.match(VC_REM))) {
+    const r = parseFaReminder(m[2]); if (!r.title) { reply(T('vcRemEmpty')); return true; }
+    addTask(r.title, r.due ? localDT(r.due) : '', r.repeat);
+    const when = r.due ? fmtDue(r.due) : T('vcNoTime');
+    reply('⏰ ' + T('vcReminded') + ' «' + r.title + '» — ' + when, T('vcReminded') + '، ' + r.title + '، ' + when); return true;
+  }
+  return false;
+}
+
+// ---- multiple conversations: D.history is always the open one; each conversation is stored as 'conv:<id>', the list in 'convs'
+let curConv = null;
+const convMeta = id => D.convs.find(c => c.id === (id || curConv));
+const convTitleOf = h => { const u = h.find(m => m.role === 'user'); return u ? u.content.replace(/\s+/g, ' ').slice(0, 40) : T('newConv'); };
+function persistConv() {
+  if (!curConv) return;
+  let m = convMeta();
+  if (!m) { if (!D.history.length) return; m = { id: curConv, title: '', created: nowISO() }; D.convs.unshift(m); }
+  m.updated = nowISO(); m.count = chatMsgs().length; if (!m.renamed) m.title = convTitleOf(D.history);
+  DB.set('conv:' + curConv, D.history).catch(() => { }); DB.set('convs', D.convs).catch(() => { });
+}
+function setCurConv(id) { curConv = id; D.settings.curConv = id; save('settings'); }
+function newConv() {
+  if (busy) return; if (editStash) editStash = null;
+  if (D.history.length) { setCurConv(uid()); D.history = []; save('history'); }
+  renderChat(); closeConvSheet();
+}
+async function openConv(id, hlIndex) {
+  if (busy) return; editStash = null;
+  if (id !== curConv) { const h = await DB.get('conv:' + id).catch(() => null); D.history = Array.isArray(h) ? h : []; setCurConv(id); DB.set('history', D.history).catch(() => { }); }
+  renderChat(); closeConvSheet(); go('chat');
+  if (hlIndex != null) { const el = $('log').querySelector(`[data-i="${hlIndex}"]`); if (el) { el.classList.add('hl'); el.scrollIntoView({ block: 'center' }); setTimeout(() => el.classList.remove('hl'), 2500); } }
+  flushOutbox();
+}
+function renameConv(id, title) { const m = convMeta(id); if (!m || !title) return; m.title = title.slice(0, 80); m.renamed = true; DB.set('convs', D.convs).catch(() => { }); }
+async function deleteConv(id) {
+  D.convs = D.convs.filter(c => c.id !== id); await DB.set('convs', D.convs).catch(() => { }); await DB.del('conv:' + id).catch(() => { });
+  if (id === curConv) { setCurConv(uid()); D.history = []; save('history'); renderChat(); }
+}
+const normSearch = s => faNorm(s).toLowerCase().replace(/\s+/g, ' ').trim();
+async function searchConvs(q) {   // full-text search across every conversation → [{ id, title, index, snippet }]
+  const n = normSearch(q); if (!n) return [];
+  const out = [];
+  for (const c of D.convs) {
+    const h = c.id === curConv ? D.history : (await DB.get('conv:' + c.id).catch(() => null)) || [];
+    h.forEach((m, i) => {
+      if ((m.role !== 'user' && m.role !== 'assistant') || out.length >= 60) return;
+      const txt = String(m.content || ''), k = normSearch(txt).indexOf(n); if (k < 0) return;
+      const st = Math.max(0, k - 30); out.push({ id: c.id, title: c.title, index: i, role: m.role, snippet: (st ? '…' : '') + txt.replace(/\s+/g, ' ').slice(st, st + 110) });
+    });
+  }
+  return out;
+}
+function openConvSheet() { $('convsheet').classList.remove('hidden'); $('cv-search').value = ''; renderConvList(); }
+function closeConvSheet() { $('convsheet').classList.add('hidden'); }
+function renderConvList() {
+  const box = $('cv-list'); box.innerHTML = '';
+  persistConv();
+  if (!D.convs.length) { box.innerHTML = `<div class="muted">${esc(T('noConvs'))}</div>`; return; }
+  [...D.convs].sort((a, b) => (b.updated || '').localeCompare(a.updated || '')).forEach(c => {
+    const d = document.createElement('div'); d.className = 'item conv' + (c.id === curConv ? ' cur' : ''); d.dataset.id = c.id;
+    const g = document.createElement('div'); g.className = 'grow'; g.innerHTML = `<b>${esc(c.title || T('newConv'))}</b><br><span class="muted">${esc(c.updated ? new Date(c.updated).toLocaleString(uiLang() === 'en' ? 'en-GB' : 'fa-IR', { dateStyle: 'medium', timeStyle: 'short' }) : '')} · ${FA(c.count || 0)} ${esc(T('msgs'))}</span>`;
+    g.onclick = () => openConv(c.id);
+    const rn = document.createElement('button'); rn.className = 'btn2 sm cv-rename'; rn.textContent = '✏️'; rn.title = T('rename'); rn.onclick = () => { const t = prompt(T('renamePrompt'), c.title || ''); if (t && t.trim()) { renameConv(c.id, t.trim()); renderConvList(); } };
+    const del = document.createElement('button'); del.className = 'del cv-del'; del.textContent = '🗑'; del.title = T('delete'); del.onclick = async () => { if (confirm(T('deleteConfirm'))) { await deleteConv(c.id); renderConvList(); } };
+    d.append(g, rn, del); box.appendChild(d);
+  });
+}
+let searchTimer = null;
+async function renderSearch() {
+  const q = $('cv-search').value; if (!q.trim()) return renderConvList();
+  const hits = await searchConvs(q), box = $('cv-list'); box.innerHTML = '';
+  if (!hits.length) { box.innerHTML = `<div class="muted">${esc(T('noResults'))}</div>`; return; }
+  const n = normSearch(q);
+  hits.forEach(h => {
+    const d = document.createElement('div'); d.className = 'item hit';
+    const sn = esc(h.snippet), k = normSearch(h.snippet).indexOf(n);
+    const mark = k >= 0 && faNorm(h.snippet).length === h.snippet.length ? esc(h.snippet.slice(0, k)) + '<mark>' + esc(h.snippet.slice(k, k + q.trim().length)) + '</mark>' + esc(h.snippet.slice(k + q.trim().length)) : sn;
+    d.innerHTML = `<div class="grow"><b>${esc(h.title || '')}</b> <span class="muted">${h.role === 'user' ? '🙂' : '🤖'}</span><br><span class="muted">${mark}</span></div>`;
+    d.onclick = () => openConv(h.id, h.index); box.appendChild(d);
+  });
+}
+
+// ---- export one chat: .txt file and a printable (Save as PDF) view
+function chatAsText(h = D.history, title = (convMeta() || {}).title || convTitleOf(D.history)) {
+  const lines = ['گوش مصنوعی — ' + title, new Date().toLocaleString('fa-IR'), ''];
+  h.forEach(m => {
+    if (m.role !== 'user' && m.role !== 'assistant' && m.role !== 'card') return;
+    const when = m.t ? ' (' + new Date(m.t).toLocaleString('fa-IR', { dateStyle: 'short', timeStyle: 'short' }) + ')' : '';
+    if (m.role === 'card') { lines.push('📄 ' + (m.kind === 'file' ? 'فایل: ' + m.name : 'پیش‌نویس: ' + (m.subject || '') + '\n' + (m.body || '')), ''); return; }
+    const media = m.media ? (m.media.kind === 'video' ? '[ویدیو ' + fmtDur(m.media.duration) + ']\n' : '[عکس]\n') : '';
+    lines.push((m.role === 'user' ? 'شما' : 'گوش') + when + ':', media + (m.content || ''), '');
+  });
+  return lines.join('\n');
+}
+const safeName = s => String(s || 'chat').replace(/[\\/:*?"<>|\n]+/g, ' ').trim().slice(0, 40) || 'chat';
+async function exportChatTxt() {
+  const name = 'goosh-' + safeName((convMeta() || {}).title || convTitleOf(D.history)) + '.txt', text = chatAsText();
+  let f = null; try { f = new File([text], name, { type: 'text/plain' }); } catch (e) { }
+  if (f && navigator.canShare && navigator.canShare({ files: [f] }) && navigator.share) { try { await navigator.share({ files: [f], title: name }); return name; } catch (e) { if (e.name === 'AbortError') return name; } }
+  download(name, text, 'text/plain'); return name;
+}
+function printChat() {
+  const title = (convMeta() || {}).title || convTitleOf(D.history);
+  const pa = $('printarea');
+  pa.innerHTML = `<h1>گوش مصنوعی — ${esc(title)}</h1><div class="pmeta">${esc(new Date().toLocaleString('fa-IR'))}</div>` + D.history.filter(m => m.role === 'user' || m.role === 'assistant').map(m =>
+    `<div class="pm pm-${m.role}"><div class="pwho">${m.role === 'user' ? 'شما' : 'گوش'}${m.t ? ' · ' + esc(new Date(m.t).toLocaleString('fa-IR', { dateStyle: 'short', timeStyle: 'short' })) : ''}</div>${m.media ? `<img src="${m.media.thumb || m.media.images[0]}" alt="">` : ''}<div dir="auto">${m.role === 'assistant' ? md(m.content) : esc(m.content)}</div></div>`).join('');
+  document.documentElement.classList.add('printing');
+  const done = () => { document.documentElement.classList.remove('printing'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  setTimeout(() => { try { window.print(); } catch (e) { addMsg('error', 'چاپ در این مرورگر ممکن نیست؛ از «خروجی متن» استفاده کنید.'); } setTimeout(done, 1500); }, 60);
+}
+
+// ---- photo extras: rotate / crop before sending, on-device OCR (Tesseract.js, Persian + English)
+async function reencode(md, draw) {   // draw(ctx, img) on a canvas sized by draw.size(img) → new image + thumbnail; old captions/OCR dropped
+  const img = await loadImg(md.images[0]); const [w, h] = draw.size(img);
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const g = c.getContext('2d'); draw(g, img);
+  md.images = [c.toDataURL('image/jpeg', 0.85)]; md.w = w; md.h = h; md.thumb = drawScaled(c, w, h, THUMB_MAX, 0.7);
+  delete md.caption; delete md.ocr; return md;
+}
+const rotateMedia = md => { const f = (g, img) => { g.translate(img.naturalHeight, 0); g.rotate(Math.PI / 2); g.drawImage(img, 0, 0); }; f.size = img => [img.naturalHeight, img.naturalWidth]; return reencode(md, f); };
+function cropMedia(md, r) {   // r = {x, y, w, h} as fractions 0..1 of the image
+  const f = (g, img) => g.drawImage(img, r.x * img.naturalWidth, r.y * img.naturalHeight, r.w * img.naturalWidth, r.h * img.naturalHeight, 0, 0, g.canvas.width, g.canvas.height);
+  f.size = img => [Math.max(1, Math.round(r.w * img.naturalWidth)), Math.max(1, Math.round(r.h * img.naturalHeight))]; return reencode(md, f);
+}
+let crop = null;
+function startCrop() {
+  const md = pendingMedia; if (!md || md.kind !== 'image') return;
+  const box = $('cropper'); box.classList.remove('hidden'); box.innerHTML = '';
+  const wrap = document.createElement('div'); wrap.className = 'cropwrap'; const img = document.createElement('img'); img.src = md.images[0]; img.draggable = false;
+  const sel = document.createElement('div'); sel.className = 'cropsel'; wrap.append(img, sel);
+  const row = document.createElement('div'); row.className = 'row'; row.style.marginTop = '6px';
+  const ok = document.createElement('button'); ok.className = 'btn'; ok.id = 'crop-ok'; ok.textContent = '✔ ' + T('applyCrop');
+  const no = document.createElement('button'); no.className = 'btn2'; no.textContent = T('cancel'); no.style.flex = '0 0 auto';
+  row.append(ok, no); box.append(Object.assign(document.createElement('div'), { className: 'muted', textContent: T('cropHint') }), wrap, row);
+  crop = { x: 0.1, y: 0.1, w: 0.8, h: 0.8 };
+  const show = () => Object.assign(sel.style, { left: crop.x * 100 + '%', top: crop.y * 100 + '%', width: crop.w * 100 + '%', height: crop.h * 100 + '%' }); show();
+  let st = null; const pt = e => { const b = wrap.getBoundingClientRect(); return [Math.min(1, Math.max(0, (e.clientX - b.left) / b.width)), Math.min(1, Math.max(0, (e.clientY - b.top) / b.height))]; };
+  wrap.onpointerdown = e => { e.preventDefault(); st = pt(e); try { wrap.setPointerCapture(e.pointerId); } catch (x) { } };
+  wrap.onpointermove = e => { if (!st) return; const [x, y] = pt(e); crop = { x: Math.min(st[0], x), y: Math.min(st[1], y), w: Math.abs(x - st[0]), h: Math.abs(y - st[1]) }; show(); };
+  wrap.onpointerup = () => { st = null; if (crop.w < 0.05 || crop.h < 0.05) { crop = { x: 0, y: 0, w: 1, h: 1 }; show(); } };
+  ok.onclick = async () => { await cropMedia(md, crop); box.classList.add('hidden'); refreshComposer(); };
+  no.onclick = () => box.classList.add('hidden');
+}
+const TESS = 'https://cdn.jsdelivr.net/npm/tesseract.js@6.0.1/dist/', TESS_CORE = 'https://cdn.jsdelivr.net/npm/tesseract.js-core@6.0.0';
+let tessWorker = null;
+async function ocrImage(src, status = () => { }) {   // free, keyless, on-device; first use downloads ≈8 MB (engine + fas + eng data, cached by the browser)
+  if (window.__ocrStub) return window.__ocrStub(src);
+  if (!tessWorker) {
+    status(T('ocrLoading'));
+    const Tess = (await import(TESS + 'tesseract.esm.min.js')).default;
+    tessWorker = await Tess.createWorker(['fas', 'eng'], 1, { workerPath: TESS + 'worker.min.js', corePath: TESS_CORE,
+      logger: m => { if (m && m.status === 'recognizing text') status(T('ocrRunning') + ' ' + FA(Math.round((m.progress || 0) * 100)) + '٪'); } });
+  }
+  status(T('ocrRunning'));
+  const r = await tessWorker.recognize(src);
+  return String((r && r.data && r.data.text) || '').replace(/[\u200e\u200f]/g, '').replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+}
+async function composerOcr() {
+  const md = pendingMedia; if (!md || md.kind !== 'image') return;
+  const out = $('cmp-ocrout'); out.classList.remove('hidden'); out.textContent = T('ocrLoading');
+  try {
+    const txt = await ocrImage(md.images[0], m => { out.textContent = m; });
+    if (pendingMedia !== md) return;
+    md.ocr = txt; out.innerHTML = '';
+    const pre = document.createElement('div'); pre.className = 'ocrtext'; pre.dir = 'auto'; pre.textContent = txt || T('ocrNone'); out.appendChild(pre);
+    if (txt) {
+      const row = document.createElement('div'); row.className = 'draftrow';
+      const cp = document.createElement('button'); cp.className = 'btn2 sm'; cp.textContent = '📋 ' + T('copy'); cp.onclick = () => copyText(txt, cp);
+      const ins = document.createElement('button'); ins.className = 'btn2 sm'; ins.id = 'ocr-ins'; ins.textContent = '✍️ ' + T('ocrInsert'); ins.onclick = () => { $('cmp-text').value = ($('cmp-text').value ? $('cmp-text').value + '\n' : '') + txt; };
+      row.append(cp, ins); out.appendChild(row);
+    }
+  } catch (e) { out.textContent = T('ocrFail') + ' ' + e.message + errTag(e.name); }
+}
+function refreshComposer() {
+  const md = pendingMedia; if (!md) return;
+  $('cmp-prev').innerHTML = ''; $('cmp-prev').appendChild(mediaEl(md));
+  $('cmp-info').textContent = md.kind === 'video' ? `ویدیو ${fmtDur(md.duration)} — ${FA(md.images.length)} فریم برای تحلیل گرفته شد (خود ویدیو ذخیره نمی‌شود).` : `عکس ${FA(md.w)}×${FA(md.h)} — برای ارسال کوچک شد.`;
+  $('cmp-tools').classList.toggle('hidden', md.kind !== 'image');
+  if (!md.ocr) { $('cmp-ocrout').classList.add('hidden'); $('cmp-ocrout').innerHTML = ''; }
+}
+
+// ---- offline queue: messages typed while offline are kept and sent automatically when the connection returns
+let flushing = false;
+async function flushOutbox() {
+  if (flushing || busy || !navigator.onLine) return;
+  const q = D.history.find(m => m.role === 'user' && m.queued); if (!q) return;
+  flushing = true;
+  try { addMsg('info', T('backOnline')); await send(null, null, { resend: q }); } finally { flushing = false; }
+}
+function updateOffline() { const off = !navigator.onLine; $('offbar') && $('offbar').classList.toggle('hidden', !off); }
+
+// ---- appearance (theme, font size) and UI language
+const uiLang = () => LS.get('uiLang', 'fa') === 'en' ? 'en' : 'fa';
+const STR = {
+  fa: { welcome: 'سلام! هر سؤالی دارید بپرسید. می‌توانید بگویید: «هوای تهران چطوره؟»، «دربارهٔ حافظ از ویکی‌پدیا بگو»، «یادت باشه که…»، «فردا ساعت ۹ یادم بنداز…» یا عکس و فایل بفرستید (📎).',
+    chips: [['📝 خلاصه کن', 'این متن را خلاصه کن:\n'], ['🌐 ترجمه کن', 'این متن را ترجمه کن (فارسی↔انگلیسی):\n'], ['💡 توضیح بده', 'به زبان ساده توضیح بده: '], ['✍️ بنویس', 'یک متن کوتاه و خوب بنویس دربارهٔ: ']],
+    thinking: 'در حال فکر کردن…', stopped: '⏹ تولید پاسخ متوقف شد. پیام شما در کادر متن برگشت.', offlineQueued: '📵 اینترنت قطع است. پیام شما در صف ماند و به محض وصل شدن اینترنت خودکار فرستاده می‌شود.',
+    offlineCall: '📵 اینترنت قطع است؛ پیام در صف ماند و تماس پایان یافت.', backOnline: '📶 اینترنت وصل شد؛ پیام در صف فرستاده می‌شود…',
+    call: '📞 تماس صوتی', endCall: '⏹ پایان تماس', readAloud: 'خواندن با صدا', copy: 'کپی', share: 'اشتراک‌گذاری', regen: 'پاسخ دوباره', edit: 'ویرایش',
+    vcStopped: 'ساکت شدم.', vcHang: 'تماس با فرمان صوتی قطع شد.', vcNoCall: 'تماسی برقرار نیست.', vcNothing: 'هنوز پاسخی برای تکرار نیست.', vcRepeat: 'تکرار آخرین پاسخ',
+    vcNoteEmpty: 'بعد از «یادداشت کن» متن یادداشت را بگویید.', vcNoted: 'یادداشت شد.', vcRemEmpty: 'بعد از «یادم بنداز» بگویید چه چیزی را یادآوری کنم.', vcReminded: 'یادآوری ثبت شد', vcNoTime: 'بدون زمان (در «کارها»)',
+    newConv: 'گفتگوی جدید', noConvs: 'هنوز گفتگویی ذخیره نشده است.', msgs: 'پیام', rename: 'تغییر نام', renamePrompt: 'نام تازهٔ گفتگو:', delete: 'حذف', deleteConfirm: 'این گفتگو حذف شود؟', noResults: 'چیزی پیدا نشد.',
+    applyCrop: 'اعمال برش', cancel: 'لغو', cropHint: 'با انگشت روی عکس یک کادر بکشید.', ocrLoading: 'بار اول: دانلود ابزار خواندن متن (حدود ۸ مگابایت)…', ocrRunning: 'در حال خواندن متن عکس…', ocrNone: '(متنی در عکس پیدا نشد)', ocrInsert: 'افزودن به پیام', ocrFail: 'خواندن متن ممکن نشد:' },
+  en: { welcome: 'Hi! Ask me anything — e.g. “What’s the weather in Tehran?”, “Tell me about Hafez”, “Remind me tomorrow at 9…”, or attach a photo/file (📎). I reply in the language you write in.',
+    chips: [['📝 Summarize', 'Summarize this text:\n'], ['🌐 Translate', 'Translate this text (Persian↔English):\n'], ['💡 Explain', 'Explain simply: '], ['✍️ Write', 'Write a short text about: ']],
+    thinking: 'Thinking…', stopped: '⏹ Stopped. Your message is back in the text box.', offlineQueued: '📵 You are offline. Your message is queued and will be sent automatically when you are back online.',
+    offlineCall: '📵 Offline — message queued, call ended.', backOnline: '📶 Back online — sending the queued message…',
+    call: '📞 Voice call', endCall: '⏹ End call', readAloud: 'Read aloud', copy: 'Copy', share: 'Share', regen: 'Regenerate', edit: 'Edit',
+    vcStopped: 'Stopped speaking.', vcHang: 'Call ended by voice command.', vcNoCall: 'No call in progress.', vcNothing: 'Nothing to repeat yet.', vcRepeat: 'Repeating the last reply',
+    vcNoteEmpty: 'Say the note after «یادداشت کن».', vcNoted: 'Note saved.', vcRemEmpty: 'Say what to remind you about after «یادم بنداز».', vcReminded: 'Reminder set', vcNoTime: 'no time (in Tasks)',
+    newConv: 'New chat', noConvs: 'No saved chats yet.', msgs: 'messages', rename: 'Rename', renamePrompt: 'New chat name:', delete: 'Delete', deleteConfirm: 'Delete this chat?', noResults: 'No results.',
+    applyCrop: 'Apply crop', cancel: 'Cancel', cropHint: 'Drag a box on the photo.', ocrLoading: 'First time: downloading the text reader (~8 MB)…', ocrRunning: 'Reading text in the photo…', ocrNone: '(no text found)', ocrInsert: 'Add to message', ocrFail: 'Could not read text:' },
+};
+const T = k => (STR[uiLang()] || STR.fa)[k] ?? STR.fa[k] ?? k;
+const EN_UI = {   // static labels in index.html (data-i18n / data-i18n-ph); Persian originals are read from the page itself
+  appTitle: 'Goosh — AI Ear', navHome: 'Home', navChat: 'Chat', navAgents: 'Agents', navTasks: 'Tasks', navNotes: 'Notes', navMemory: 'Memory', navSettings: 'Settings',
+  send: 'Send', newchat: '➕', convs: '🗂 Chats', stopgen: '⏹ Stop', msgPh: 'Message…', amPhoto: '🖼 Photo', amVideo: '🎥 Video', amCam: '📷 Camera', amRec: '🎬 Record', amFile: '📄 Text/PDF file',
+  cvTitle: 'Chats', cvNew: '➕ New chat', cvSearchPh: 'Search all chats…', cvTxt: '⬇️ Export text (.txt)', cvPrint: '🖨 Print / PDF', editing: '✏️ Editing your last message', cancelEdit: '✕ Cancel',
+  offbar: '📵 Offline — messages are queued and sent when you reconnect', cmpSend: 'Send', cmpCancel: 'Cancel', cmpRot: '⟳ Rotate', cmpCrop: '✂️ Crop', cmpOcr: '🔤 Read text in photo',
+  stBrain: 'Online brain', stVoice: 'Voice', stLook: '🎨 Appearance', stPerms: '🔐 Permissions', stPc: 'PC connection (optional)', stBackup: 'Backup', stFeat: 'Features', updBtn: '🔄 Update (get the latest version)',
+  lbRate: 'Speech speed', lbVol: 'Speech volume', lbTheme: 'Theme', lbFont: 'Font size', lbLang: 'App language',
+};
+function applyLang() {
+  const en = uiLang() === 'en';
+  document.documentElement.lang = en ? 'en' : 'fa'; document.documentElement.dir = en ? 'ltr' : 'rtl';
+  document.querySelectorAll('[data-i18n]').forEach(el => { if (el.dataset.fa == null) el.dataset.fa = el.textContent; el.textContent = en ? (EN_UI[el.dataset.i18n] || el.dataset.fa) : el.dataset.fa; });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { if (el.dataset.faPh == null) el.dataset.faPh = el.placeholder; el.placeholder = en ? (EN_UI[el.dataset.i18nPh] || el.dataset.faPh) : el.dataset.faPh; });
+  $('callbtn').textContent = call.on ? T('endCall') : T('call');
+}
+const themeMode = () => { const m = LS.get('theme', 'auto'); return ['auto', 'light', 'dark'].includes(m) ? m : 'auto'; };
+const darkMQ = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : null;
+function applyTheme() {
+  const m = themeMode(), dark = m === 'dark' || (m === 'auto' && darkMQ && darkMQ.matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const fz = +LS.get('fontScale', 1); document.documentElement.style.setProperty('--fz', [0.9, 1, 1.15, 1.3].includes(fz) ? fz : 1);
+}
+if (darkMQ) { try { darkMQ.addEventListener('change', applyTheme); } catch (e) { darkMQ.addListener && darkMQ.addListener(applyTheme); } }
+applyTheme();
 
 // ------------------------------------------------------------------ files (txt/md/pdf → text, stored on phone)
 // Rebuild reading order from positioned glyphs (Persian PDFs often store visual-order presentation forms)
@@ -1019,6 +1406,8 @@ function fillSettings() {
   loadVoices && HAS_TTS && loadVoices();
   $('voiceinfo').textContent = 'تشخیص گفتار داخل برنامه: ' + (SRClass && !srBlocked() ? 'موجود (پشتیبانی واقعی به نسخهٔ iOS بستگی دارد)' : 'ناموجود — از میکروفون کیبورد آیفون استفاده کنید') +
     ' · صدای فارسی برای خواندن: ' + (HAS_TTS && pickVoice(true) ? 'موجود' : HAS_TTS && !voices.length ? 'نامعلوم (فهرست صداها هنوز بار نشده)' : 'ناموجود') + (STANDALONE ? ' · حالت برنامهٔ صفحهٔ اصلی' : '');
+  $('st-rate').value = ttsRate(); $('st-vol').value = ttsVol(); showVoiceLevels();
+  $('st-theme').value = themeMode(); $('st-font').value = String([0.9, 1, 1.15, 1.3].includes(+LS.get('fontScale', 1)) ? +LS.get('fontScale', 1) : 1); $('st-lang').value = uiLang();
   $('appver').textContent = 'نسخه ' + APP_VERSION + (navigator.serviceWorker && navigator.serviceWorker.controller ? '' : ' · بدون service worker');
   renderPerms(); renderFeatures();
 }
@@ -1087,7 +1476,21 @@ $('fileinput').onchange = async e => {
   try { const name = await addFile(f); $('nt-status').textContent = '✅ اضافه شد: ' + name; if (uploadTarget === 'chat') send(`📎 ${name} — خلاصه‌اش را بگو.`, fileAsk(D.notes[0])); else renderNotes(); }
   catch (err) { alert('خواندن فایل ممکن نشد: ' + err.message); }
 };
-$('newchat').onclick = () => { D.history = []; save('history'); renderChat(); };
+$('newchat').onclick = newConv;
+$('convbtn').onclick = openConvSheet; $('cv-close').onclick = closeConvSheet; $('cv-new').onclick = newConv;
+$('convsheet').onclick = e => { if (e.target === $('convsheet')) closeConvSheet(); };
+$('cv-search').oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(renderSearch, 200); };
+$('cv-txt').onclick = () => exportChatTxt(); $('cv-print').onclick = () => { closeConvSheet(); printChat(); };
+$('stopgen').onclick = () => { if (genCtl) genCtl.abort(); };
+$('editcancel').onclick = cancelEdit;
+$('cmp-rot').onclick = async () => { if (pendingMedia) { await rotateMedia(pendingMedia); refreshComposer(); } };
+$('cmp-crop').onclick = startCrop; $('cmp-ocr').onclick = composerOcr;
+function showVoiceLevels() { $('st-rate-v').textContent = FA(ttsRate().toFixed(1)) + '×'; $('st-vol-v').textContent = FA(Math.round(ttsVol() * 100)) + '٪'; }
+$('st-rate').oninput = e => { LS.set('ttsRate', +e.target.value); showVoiceLevels(); };
+$('st-vol').oninput = e => { LS.set('ttsVol', +e.target.value); showVoiceLevels(); };
+$('st-theme').onchange = e => { LS.set('theme', e.target.value); applyTheme(); };
+$('st-font').onchange = e => { LS.set('fontScale', +e.target.value); applyTheme(); };
+$('st-lang').onchange = e => { LS.set('uiLang', e.target.value); applyLang(); renderChat(); fillSettings(); };
 $('ag-add').onclick = () => {
   const name = $('ag-name').value.trim(), inst = $('ag-inst').value.trim(); if (!name || !inst) return alert('نام و دستور را بنویسید.');
   D.agents.push({ id: uid(), name, instructions: inst, time: $('ag-time').value || '', saveNote: $('ag-save').checked, created: nowISO() }); save('agents');
@@ -1116,23 +1519,37 @@ $('upd-btn').onclick = forceUpdate;
 $('st-whisper').onchange = e => { D.settings.whisper = e.target.checked; save('settings'); };
 $('st-pcon').onchange = e => { D.settings.pcOn = e.target.checked; save('settings'); renderFeatures(); };
 $('st-pcsave').onclick = async () => { D.settings.pcBase = $('st-pc').value.trim().replace(/\/$/, ''); D.settings.pin = $('st-pin').value.trim(); D.settings.pcOn = true; $('st-pcon').checked = true; save('settings'); $('st-pcmsg').textContent = (await pcAvailable()) ? '✅ وصل شد' : '❌ در دسترس نیست'; };
-$('bk-exp').onclick = async () => { const data = { app: 'gooshe-masnooi', version: 1, exported: nowISO() }; KEYS.forEach(k => data[k] = D[k]); download('goosh-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 1), 'application/json'); };
+$('bk-exp').onclick = async () => { const data = { app: 'gooshe-masnooi', version: 2, exported: nowISO() }; KEYS.forEach(k => data[k] = D[k]); persistConv(); data.convs = D.convs; data.curConv = curConv; data.convData = {}; for (const c of D.convs) data.convData[c.id] = c.id === curConv ? D.history : (await DB.get('conv:' + c.id).catch(() => null)) || []; download('goosh-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 1), 'application/json'); };
 $('bk-imp').onclick = () => $('importinput').click();
 $('importinput').onchange = async e => {
   const f = e.target.files[0]; e.target.value = ''; if (!f) return;
-  try { const data = JSON.parse(await f.text()); if (data.app !== 'gooshe-masnooi') throw new Error('فایل پشتیبان نیست'); for (const k of KEYS) if (data[k]) { D[k] = data[k]; await save(k); } alert('بازگردانی شد'); renderChat(); go('home'); }
+  try {
+    const data = JSON.parse(await f.text()); if (data.app !== 'gooshe-masnooi') throw new Error('فایل پشتیبان نیست');
+    for (const k of KEYS) if (data[k] && k !== 'history') { D[k] = data[k]; await save(k); }
+    if (Array.isArray(data.convs) && data.convData) {   // v2 backup: every conversation
+      for (const c of data.convs) { await DB.set('conv:' + c.id, data.convData[c.id] || []); if (!D.convs.find(x => x.id === c.id)) D.convs.push(c); }
+      await DB.set('convs', D.convs); const id = data.curConv && data.convs.find(c => c.id === data.curConv) ? data.curConv : data.convs[0] && data.convs[0].id;
+      if (id) { D.history = data.convData[id] || []; curConv = id; }
+    } else if (Array.isArray(data.history) && data.history.length) { curConv = uid(); D.history = data.history; }   // v1 backup: one chat → a new conversation
+    if (curConv) { D.settings.curConv = curConv; await save('settings'); await save('history'); }
+    alert('بازگردانی شد'); renderChat(); go('home');
+  }
   catch (err) { alert('خطا: ' + err.message); }
 };
-window.addEventListener('online', refreshBadges); window.addEventListener('offline', refreshBadges);
+window.addEventListener('online', () => { refreshBadges(); updateOffline(); flushOutbox(); }); window.addEventListener('offline', () => { refreshBadges(); updateOffline(); });
 function stopAllVoice() { stopCall(); if (S) stopRec(true); if (wRec) wRec.stop(); stopSpeaking(); }
 window.addEventListener('pagehide', stopAllVoice);
 document.addEventListener('visibilitychange', () => { if (document.hidden) stopAllVoice(); if (!document.hidden) { refreshBadges(); notifyDue(); catchUpAgents(); } });
 
 (async function init() {
   for (const k of KEYS) { const v = await DB.get(k).catch(() => undefined); if (v !== undefined) D[k] = v; }
+  D.convs = (await DB.get('convs').catch(() => null)) || [];   // 1.6.0: multiple conversations (older data becomes the first one)
+  curConv = D.settings.curConv || null; if (!curConv) { curConv = uid(); D.settings.curConv = curConv; save('settings'); }
+  if (D.history.length) persistConv();
+  applyLang(); updateOffline();
   if (navigator.storage?.persist) navigator.storage.persist().then(p => { $('bk-info') && ($('bk-info').textContent = p ? 'ذخیره‌سازی ماندگار فعال است.' : 'مرورگر ذخیره‌سازی ماندگار را تأیید نکرد؛ پشتیبان بگیرید.'); });
   renderChat(); refreshBadges(); go(new URLSearchParams(location.search).get('view') || D.settings.view || 'home');
-  notifyDue(); catchUpAgents();
+  notifyDue(); catchUpAgents(); flushOutbox();
   if ('serviceWorker' in navigator) {
     const hadController = !!navigator.serviceWorker.controller; let reloaded = false;
     navigator.serviceWorker.addEventListener('message', e => { if (e.data === 'reload' && !reloaded && !call.on) { reloaded = true; location.reload(); } });
@@ -1141,4 +1558,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   }
   window.__ready = true;
 })();
-window.__app = { imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
+window.__app = { speak, voiceCommand, parseFaReminder, searchConvs, openConv, newConv, renameConv, deleteConv, chatAsText, exportChatTxt, printChat, rotateMedia, cropMedia, ocrImage, flushOutbox, ttsRate, ttsVol, applyTheme, applyLang, T, regenerate, editLast, cancelEdit, get curConv() { return curConv; }, get pendingMedia() { return pendingMedia; }, imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };

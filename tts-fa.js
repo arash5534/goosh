@@ -55,7 +55,7 @@ async function phonemize(text) {   // espeak-ng phonemes → Piper ids; one outp
   m.callMain(['-l', S.cfg.espeak.voice, '--input', JSON.stringify([{ text }]), '--espeak_data', '/espeak-ng-data']);
   return lines.filter(x => x && x.length);
 }
-export async function synth(text) {   // → Float32Array PCM at S.sampleRate
+export async function synth(text, opts = {}) {   // → Float32Array PCM at S.sampleRate; opts.rate 0.7–1.5 (speech speed via Piper length_scale, natural pitch)
   if (!S) await load();
   const { ort, cfg, session } = S; const inf = cfg.inference || {};
   const out = []; const gap = new Float32Array(Math.round(S.sampleRate * 0.12));
@@ -63,7 +63,7 @@ export async function synth(text) {   // → Float32Array PCM at S.sampleRate
     const feeds = {
       input: new ort.Tensor('int64', BigInt64Array.from(ids.map(BigInt)), [1, ids.length]),
       input_lengths: new ort.Tensor('int64', BigInt64Array.from([BigInt(ids.length)]), [1]),
-      scales: new ort.Tensor('float32', Float32Array.from([inf.noise_scale ?? 0.667, inf.length_scale ?? 1, inf.noise_w ?? 0.8]), [3]),
+      scales: new ort.Tensor('float32', Float32Array.from([inf.noise_scale ?? 0.667, (inf.length_scale ?? 1) / Math.pow(Math.min(1.5, Math.max(0.7, +opts.rate || 1)), 1.33), inf.noise_w ?? 0.8]), [3]),
     };
     if (cfg.num_speakers > 1) feeds.sid = new ort.Tensor('int64', BigInt64Array.from([0n]), [1]);
     const r = await session.run(feeds); out.push(r.output.data, gap);

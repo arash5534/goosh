@@ -3,8 +3,8 @@
 //   other static files are cache-first (refreshed in the background). Offline: everything falls back to the cache.
 // - On activate it deletes every older cache and, when it is replacing an older build, reloads open windows
 //   (so a page still running an old build switches to the new one without the user doing anything).
-const VERSION = 'goosh-v12';
-const FILES = ['./', 'index.html', 'app.js?v=1.5.0', 'style.css?v=1.5.0', 'tts-fa.js?v=1.5.0', 'vision.js?v=1.5.0', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
+const VERSION = 'goosh-v13';
+const FILES = ['./', 'index.html', 'app.js?v=1.6.0', 'style.css?v=1.6.0', 'tts-fa.js?v=1.6.0', 'vision.js?v=1.6.0', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
   'icons/icon.svg', 'icons/goosh-180.png', 'icons/goosh-192.png', 'icons/goosh-512.png', 'icons/goosh-maskable-512.png',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting())));
