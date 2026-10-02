@@ -11,6 +11,13 @@ piper_phonemize.wasm, piper_phonemize.data
   contains piper-phonemize (https://github.com/rhasspy/piper-phonemize) and espeak-ng data
   (GPL-3.0 — source: https://github.com/espeak-ng/espeak-ng)
 
+vosk.js
+  vosk-browser 0.0.8 (Vosk / Kaldi compiled to WebAssembly, worker inlined) — Apache-2.0 — https://github.com/ccoreilly/vosk-browser
+
+vosk-model-small-fa.tar.gz
+  vosk-model-small-fa-0.42 (Persian) — Apache-2.0 — https://alphacephei.com/vosk/models
+  repacked from the official .zip into .tar.gz (files unchanged; test/ and README removed)
+
 tesseract.min.js
   tesseract.js 6.0.1 — Apache-2.0 — https://github.com/naptha/tesseract.js
 

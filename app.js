@@ -478,8 +478,9 @@ async function videoFromFile(file, n = VIDEO_FRAMES) {   // N evenly spaced fram
   finally { v.removeAttribute('src'); try { v.load(); } catch (e) { } v.remove(); URL.revokeObjectURL(url); }
 }
 let visionMod = null;
-const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.7.0').then(m => (visionMod = m));
+const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.8.0').then(m => (visionMod = m));
 async function describeMedia(md, status) {   // on-device captions (Florence-2) → stored with the message
+  if (sttMod && sttMod.loaded()) sttMod.unload();   // memory: never keep the vision model and the speech model loaded together
   const V = await loadVision();
   if (!(await V.isDownloaded())) status('دانلود مدل بینایی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(V.APPROX_BYTES / 1e6)) + ' مگابایت)… ۰٪');
   await V.load(f => status('دانلود مدل بینایی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(V.APPROX_BYTES / 1e6)) + ' مگابایت)… ' + FA(Math.round(f * 100)) + '٪'));
@@ -592,7 +593,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
-const APP_VERSION = '1.7.0 (goosh-v14)';
+const APP_VERSION = '1.8.0 (goosh-v15)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
@@ -610,7 +611,15 @@ const ttsOn = () => LS.get('tts', true);
 const autoSend = () => LS.get('autoSend', true);
 const sess = { get: k => { try { return sessionStorage.getItem('goosh.' + k); } catch (e) { return null; } }, set: (k, v) => { try { sessionStorage.setItem('goosh.' + k, v); } catch (e) { } } };
 const srBlocked = () => sess.get('srBlocked') === '1';
-const markSrBlocked = code => { sess.set('srBlocked', '1'); if (code) sess.set('srBlockedCode', code); };
+// 1.8.0 speech-to-text engines: 'local' = Vosk Persian model ON the phone (no Apple service), 'browser' = SpeechRecognition.
+// iOS refuses SpeechRecognition for Persian (service-not-allowed even in a Safari tab) → on iOS the on-device engine is first;
+// elsewhere browser recognition is used only while it works (any refusal is remembered in 'srDead' and skipped from then on).
+const sttMode = () => { const m = LS.get('sttEngine', 'auto'); return m === 'whisper' ? 'local' : ['auto', 'local', 'browser'].includes(m) ? m : 'auto'; };
+const LOCAL_OK = !!(window.WebAssembly && window.Worker && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+const srDead = () => LS.get('srDead', '');
+const useLocal = () => { const m = sttMode(); if (!LOCAL_OK) return false; if (m === 'local') return true; if (!SRClass || srDead()) return true; return m === 'auto' && IOS; };
+const ASR_NOTE = '\n\n(این پیام با تشخیص گفتار خودکار روی گوشی نوشته شده و ممکن است کلمه‌ای اشتباه یا محاوره‌ای نوشته شده باشد؛ منظور کاربر را حدس بزن و کوتاه و طبیعی جواب بده.)';
+const markSrBlocked = code => { sess.set('srBlocked', '1'); if (code) sess.set('srBlockedCode', code); if (/service-not-allowed|language-not-supported|unavailable/.test(code || '')) LS.set('srDead', code); };
 
 const STT_ERR = {
   'not-allowed': 'اجازهٔ میکروفون یا تشخیص گفتار داده نشد. در آیفون: Settings ← Safari ← Microphone را روی Allow بگذارید و Settings ← Privacy & Security ← Speech Recognition را روشن کنید، بعد برنامه را کامل ببندید و دوباره باز کنید. (راه جایگزین: روی کادر پیام بزنید و از میکروفون کیبورد آیفون استفاده کنید.)',
@@ -635,6 +644,12 @@ function srUnavailable(code, quiet) {   // recognition missing / refused → cle
   logErr('sr-unavailable', code + (STANDALONE ? ' (standalone)' : ''));
   if (!quiet) { try { $('t').focus(); } catch (e) { } }   // inside a tap this opens the keyboard, where the dictation mic lives
   const base = STANDALONE ? STANDALONE_SR_MSG : code === 'service-not-allowed' ? STT_ERR['service-not-allowed'] + '\n' + DICTATION_HINT : DICTATION_HINT;
+  if (LOCAL_OK) {
+    if (/service-not-allowed|language-not-supported|unavailable/.test(code || '')) LS.set('srDead', code);
+    const el = addMsg('info', 'تشخیص گفتار اپل/سیری برای فارسی در این گوشی در دسترس نیست (' + code + '). از این به بعد تشخیص گفتار فارسی داخل خود برنامه (روی گوشی، رایگان، بدون اینترنت پس از دانلود) استفاده می‌شود.' + errTag(code));
+    const b = document.createElement('button'); b.className = 'btn sm'; b.style.marginTop = '6px'; b.textContent = '🎙 حالا صحبت کنید (تشخیص گفتار داخل گوشی)';
+    b.onclick = () => { b.remove(); unlockTTS(); localOnce(); }; el.appendChild(b); return el;
+  }
   const el = addMsg('info', base + errTag(code));
   if (STANDALONE) safariButtons(el);
   return el;
@@ -689,6 +704,8 @@ function micClick() {
   unlockTTS(); stopSpeaking();                            // tapping the mic always silences the assistant
   if (call.on) return callMicTap();
   if (S) { stopRec(false); return; }                      // tap again to stop
+  if (lRec) { lRec.stop(); return; }
+  if (useLocal()) return localOnce();                     // on-device Persian engine (iOS default)
   if (!SRClass) return srUnavailable('SpeechRecognition-unavailable');
   if (srBlocked()) return dictationFallback(sess.get('srBlockedCode') || 'service-not-allowed');
   if (!LS.get('micPrimed', false) && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) return primeMicThenListen();
@@ -747,17 +764,21 @@ function setPhase(p) {
 }
 function startCall() {
   unlockTTS(); stopSpeaking();
-  if (!SRClass || srBlocked()) { addMsg('info', 'تماس صوتی به تشخیص گفتار داخل برنامه نیاز دارد.'); srUnavailable(!SRClass ? 'SpeechRecognition-unavailable' : sess.get('srBlockedCode') || 'service-not-allowed'); return; }
+  const loc = useLocal();
+  if (!loc && (!SRClass || srBlocked())) { addMsg('info', 'تماس صوتی به تشخیص گفتار داخل برنامه نیاز دارد.'); srUnavailable(!SRClass ? 'SpeechRecognition-unavailable' : sess.get('srBlockedCode') || 'service-not-allowed'); return; }
   if (S) stopRec(true);
+  if (lRec) (lRec.cancel || lRec.stop)();
   call.on = true; call.noSpeech = 0; call.gen++;
   $('callbtn').textContent = T('endCall'); $('callbtn').classList.add('oncall');
   callListen(true);                                       // first start: synchronously inside the tap (getUserMedia / recognition.start)
   unloadVision();                                         // memory: no vision model during a call
+  if (loc) loadSttMod().then(m => m.load()).catch(e => logErr('stt-preload', e));   // load the Persian model while the user talks
   if (IOS && !LS.get('silentHint', false)) { LS.set('silentHint', true); addMsg('info', '🔈 اگر صدای پاسخ را نمی‌شنوید: کلید بی‌صدا (کنار آیفون) را خاموش کنید و صدای گوشی را بالا ببرید. برای بررسی کامل: تنظیمات ← 🩺 بررسی صدا.'); }
 }
 function stopCall(msg) {
   if (!call.on) return;
   call.on = false; call.gen++; if (busy && genCtl) genCtl.abort();
+  if (call.rec) { call.rec.cancel(); call.rec = null; } setCallLevel(0);
   $('tapcont').classList.add('hidden'); stopRec(true); stopSpeaking(); setPhase('');
   $('callbtn').textContent = T('call'); $('callbtn').classList.remove('oncall');
   if (msg) addMsg('info', msg);
@@ -767,7 +788,35 @@ function callListen(gesture) {
   if (!call.on) return;
   $('tapcont').classList.add('hidden'); $('t').value = ''; growInput(); setPhase('listening');
   const gen = call.gen;
+  if (useLocal()) return callLocalTurn(gesture, gen);
   startRec(s => callHeard(s, gen), gesture, false);   // one shot per turn; restarted after every reply
+}
+function setCallLevel(pk) { const el = $('callstate'); if (el) el.style.boxShadow = pk ? `inset ${Math.round(Math.min(1, pk * 3) * 120)}px 0 0 rgba(220,30,30,.28)` : ''; }
+function callLocalTurn(gesture, gen) {   // one hands-free turn: mic (fresh each turn) → ~1.2 s silence → mic released → Vosk on the phone → reply
+  getMic().then(async stream => {          // getUserMedia runs synchronously here (inside the tap on the first turn / tap-to-continue)
+    if (!call.on || gen !== call.gen) { stream.getTracks().forEach(t => t.stop()); return; }
+    const r = await recordUtterance(stream, { maxMs: 20000, noSpeechMs: 8000, onLevel: (rms, pk) => setCallLevel(pk), handle: h => { call.rec = h; } });
+    call.rec = null; setCallLevel(0); lastRec = r;
+    if (!call.on || gen !== call.gen) return;
+    if (!r.speech) {
+      if (r.reason === 'no-audio') { logErr('mic', 'no audio pcm=' + r.pcmSamples + ' bytes=' + r.bytes + ' ac=' + r.acState); return pauseCall('صدایی از میکروفون نرسید', 'no-audio pcm=' + r.pcmSamples + ' bytes=' + r.bytes + ' ac=' + r.acState); }
+      if (++call.noSpeech >= MAX_NOSPEECH) return pauseCall('صدایی نشنیدم');
+      return callListen(false);
+    }
+    setPhase('transcribing');
+    let text = '';
+    try { text = await transcribeLocal(r); }
+    catch (e) { logErr('stt', e); if (call.on && gen === call.gen) stopCall('تبدیل گفتار به متن ممکن نشد: ' + (e.message || '') + errTag(e.name)); return; }
+    if (!call.on || gen !== call.gen) return;
+    if (!text) { if (++call.noSpeech >= MAX_NOSPEECH) return pauseCall('متوجه نشدم'); return callListen(false); }
+    $('t').value = text; growInput();
+    callHeard({ text, started: true, error: null, gesture, asr: true }, gen);
+  }, e => {
+    logErr('getUserMedia', e);
+    if (!call.on || gen !== call.gen) return;
+    if ((e.name === 'NotAllowedError' || e.name === 'SecurityError') && gesture) return stopCall(STT_ERR['not-allowed'] + errTag(e.name));
+    pauseCall('برای روشن شدن میکروفون ضربه بزنید', e.name);   // no tap → the big tap-to-continue button (mic reopened inside that tap)
+  });
 }
 function callHeard(s, gen) {
   if (s.cancelled || !call.on || gen !== call.gen) return;
@@ -791,7 +840,7 @@ function callHeard(s, gen) {
   call.noSpeech = 0; $('t').value = ''; growInput();
   if (voiceCommand(text, true)) return;   // «ساکت شو»، «تماس رو قطع کن»، «دوباره بگو»، «یادداشت کن …»، «یادم بنداز …»
   setPhase('thinking');
-  send(text, null, { fromCall: true }).then(reply => {
+  send(text, s.asr ? text + ASR_NOTE : null, { fromCall: true }).then(reply => {
     if (!call.on || gen !== call.gen) return;
     if (!reply) return stopCall(navigator.onLine ? 'پاسخی دریافت نشد؛ تماس پایان یافت.' : T('offlineCall'));
     setPhase('speaking');
@@ -799,6 +848,7 @@ function callHeard(s, gen) {
   });
 }
 function callMicTap() {
+  if (call.phase === 'listening' && call.rec) return call.rec.stop();   // "I'm done talking" → transcribe now
   if (call.phase === 'speaking' || call.phase === 'paused') { stopSpeaking(); call.noSpeech = 0; callListen(true); }
   else if (call.phase === 'listening' && S) stopRec(false);   // "I'm done talking" → send now
 }
@@ -902,9 +952,41 @@ function micErrMsg(e) {
   else if (name === 'NotFoundError' || name === 'NotReadableError') addMsg('info', STT_ERR['audio-capture'] + errTag(name));
   else addMsg('info', 'دسترسی به میکروفون ممکن نشد.' + errTag(name + ': ' + ((e && e.message) || '')));
 }
+// ---- on-device Persian speech-to-text (stt-fa.js: Vosk, self-hosted, lazy)
+let sttMod = null, sttMsg = null, lRec = null, lastRec = null;
+const loadSttMod = () => window.__sttStub ? Promise.resolve(window.__sttStub) : sttMod ? Promise.resolve(sttMod) : import('./stt-fa.js?v=1.8.0').then(m => (sttMod = m));
+async function ensureStt(statusEl) {   // first use downloads the model once (progress shown in Persian)
+  const m = await loadSttMod(); if (m.loaded()) return m;
+  const dl = await m.isDownloaded(), mb = FA(Math.round(m.TOTAL_BYTES / 1e6));
+  const txt = f => dl ? 'آماده‌سازی تشخیص گفتار فارسی داخل گوشی…' : `بار اول: دانلود تشخیص گفتار فارسی داخل گوشی (حدود ${mb} مگابایت، فقط یک بار؛ بهتر با Wi-Fi)… ${FA(Math.round(f * 100))}٪`;
+  const el = statusEl || (sttMsg && sttMsg.isConnected ? sttMsg : (sttMsg = addMsg('info', txt(0))));
+  try { await m.load(f => { el.textContent = txt(f); }); return m; }
+  catch (e) { logErr('stt-load', e); throw Object.assign(new Error('تشخیص گفتار داخل گوشی بار نشد (' + (e.message || e) + ')'), { name: e.name || 'Error' }); }
+  finally { if (!statusEl && el.isConnected) el.remove(); if (el === sttMsg) sttMsg = null; }
+}
+const cleanAsr = t => String(t || '').replace(/\s+/g, ' ').trim();
+async function transcribeLocal(r) { const m = await ensureStt(); return cleanAsr(await m.transcribe(r.pcm16, 16000)); }
+function localOnce() {   // 🎤 single shot: tap → mic → silence auto-stop → text
+  if (lRec) { lRec.stop(); return; }
+  const micP = getMic();   // synchronously inside the tap
+  loadSttMod().then(m => m.isDownloaded().then(d => { if (d) m.load().catch(() => { }); })).catch(() => { });   // warm the cached model in parallel
+  setMicUI(true); lRec = { stop: () => { }, cancel: () => { } };
+  micP.then(async stream => {
+    const r = await recordUtterance(stream, { maxMs: 30000, noSpeechMs: 8000, handle: h => { lRec = h; } });
+    lRec = null; setMicUI(false); lastRec = r;
+    if (r.endReason === 'cancel') return;
+    if (!r.speech) { if (r.reason === 'no-audio') logErr('mic', 'no audio pcm=' + r.pcmSamples + ' bytes=' + r.bytes + ' ac=' + r.acState); addMsg('info', r.reason === 'no-audio' ? 'صدایی از میکروفون نرسید. «🩺 بررسی صدا» را در تنظیمات اجرا کنید.' + errTag('no-audio pcm=' + r.pcmSamples + ' bytes=' + r.bytes + ' ac=' + r.acState) : 'صدایی شنیده نشد. نزدیک‌تر به گوشی صحبت کنید.'); return; }
+    const w = addMsg('info', 'در حال تبدیل گفتار به متن…');
+    try {
+      await ensureStt(w); w.textContent = 'در حال تبدیل گفتار به متن…';
+      const txt = await transcribeLocal(r); w.remove();
+      if (!txt) addMsg('info', 'متوجه نشدم؛ دوباره و کمی بلندتر بگویید.'); else if (voiceCommand(txt, false)) { } else if (autoSend() && !busy) send(txt, txt + ASR_NOTE); else { $('t').value = txt; growInput(); }
+    } catch (e) { w.remove(); logErr('stt', e); addMsg('error', 'تبدیل گفتار به متن ممکن نشد: ' + (e.message || '') + errTag(e.name)); }
+  }, e => { lRec = null; setMicUI(false); logErr('getUserMedia', e); micErrMsg(e); });
+}
 function suspendVoice() {   // app went to the background: release the mic, stop audio; a call is paused (tap to continue), not ended
-  if (call.on) { call.gen++; if (S) stopRec(true); stopSpeaking(); pauseCall('برنامه به پس‌زمینه رفت؛ برای ادامه ضربه بزنید'); }
-  else { if (S) stopRec(true); stopSpeaking(); }
+  if (call.on) { call.gen++; if (call.rec) { call.rec.cancel(); call.rec = null; } if (S) stopRec(true); stopSpeaking(); pauseCall('برنامه به پس‌زمینه رفت؛ برای ادامه ضربه بزنید'); }
+  else { if (S) stopRec(true); if (lRec) (lRec.cancel || lRec.stop)(); stopSpeaking(); }
 }
 
 // ---- text-to-speech
@@ -915,7 +997,7 @@ let voices = [], ttsUnlocked = false, ttsToken = 0, ttsBtn = null, ttsStopWait =
 const faVoiceMode = () => { const m = LS.get('faVoice', 'auto'); return ['auto', 'piper', 'system'].includes(m) ? m : 'auto'; };
 let piperFailed = null, ttsFa = null;
 const faEngine = () => { const m = faVoiceMode(); if (m === 'system') return 'system'; if (piperFailed && m === 'auto') return 'system'; if (m === 'piper') return 'piper'; return HAS_TTS && pickVoice(true) ? 'system' : 'piper'; };
-const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.7.0').then(m => (ttsFa = m));
+const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.8.0').then(m => (ttsFa = m));
 const AUD = new Audio(); AUD.preload = 'auto'; AUD.setAttribute('playsinline', ''); AUD.setAttribute('webkit-playsinline', '');
 const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
 let piperMsg = null;
@@ -1435,30 +1517,34 @@ function startDiag() {   // tap handler: AudioContext resume + silent buffer AND
 async function runDiag(micP) {
   const ua = navigator.userAgent, iosV = (ua.match(/OS (\d+)[_.](\d+)(?:[_.](\d+))?/) || []).slice(1).filter(Boolean).join('.');
   dSet('env', 'دستگاه و مرورگر', 'ok', (IOS ? 'iOS ' + (iosV || '?') : navigator.platform || '?') + (STANDALONE ? ' · برنامهٔ صفحهٔ اصلی (PWA)' : ' · داخل مرورگر'), `app ${APP_VERSION}\nUA: ${ua}\nsecureContext=${isSecureContext} online=${navigator.onLine}`);
+  dSet('eng', 'موتور تشخیص گفتار', LOCAL_OK ? 'ok' : 'fail', useLocal() ? 'داخل گوشی: Vosk فارسی (بدون سیری)' : 'سیری / تشخیص گفتار مرورگر', `setting=${sttMode()} srDead=${srDead() || '-'} LOCAL_OK=${LOCAL_OK} WebAssembly=${!!window.WebAssembly} Worker=${!!window.Worker}`);
   const SRT = 'تشخیص گفتار مرورگر (SpeechRecognition)';
-  dSet('sr', SRT, SRClass ? (srBlocked() ? 'warn' : 'ok') : 'fail', SRClass ? 'وجود دارد' + (srBlocked() ? ' — ولی در این اجرا رد شد: ' + (sess.get('srBlockedCode') || '?') : ' — با دکمهٔ آزمایش پایین امتحان کنید') : (STANDALONE ? 'در حالت برنامهٔ صفحهٔ اصلی وجود ندارد — برنامه را در Safari باز کنید' : 'در این مرورگر وجود ندارد — از دیکتهٔ کیبورد استفاده کنید'),
+  dSet('sr', SRT, SRClass ? (srBlocked() ? 'warn' : 'ok') : useLocal() ? 'warn' : 'fail', SRClass ? 'وجود دارد' + (srBlocked() ? ' — ولی در این اجرا رد شد: ' + (sess.get('srBlockedCode') || '?') : ' — با دکمهٔ آزمایش پایین امتحان کنید') : (STANDALONE ? 'در حالت برنامهٔ صفحهٔ اصلی وجود ندارد — برنامه را در Safari باز کنید' : 'در این مرورگر وجود ندارد — از دیکتهٔ کیبورد استفاده کنید'),
     `SpeechRecognition=${!!window.SpeechRecognition} webkitSpeechRecognition=${!!window.webkitSpeechRecognition}\nstandalone=${STANDALONE} lang=${srLang()} (fa-IR → fa fallback)\nsafari-url=${SAFARI_URL}`);
-  if (!SRClass && STANDALONE) { const b = dButtons('sr', []); safariButtons(b); }
+  if (!SRClass && STANDALONE && !LOCAL_OK) { const b = dButtons('sr', []); safariButtons(b); }
+  if (!SRClass && useLocal()) dSet('sr', SRT, 'warn', 'وجود ندارد — لازم هم نیست: تشخیص گفتار فارسی داخل گوشی استفاده می‌شود', `SpeechRecognition=${!!window.SpeechRecognition} webkitSpeechRecognition=${!!window.webkitSpeechRecognition} standalone=${STANDALONE}`);
   const mimes = window.MediaRecorder && MediaRecorder.isTypeSupported ? ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/wav'].filter(t => MediaRecorder.isTypeSupported(t)) : [];
   dSet('mr', 'MediaRecorder', window.MediaRecorder ? (mimes.length ? 'ok' : 'warn') : 'warn', window.MediaRecorder ? 'قالب‌ها: ' + (mimes.join(' ، ') || 'هیچ') : 'وجود ندارد (ضبط PCM کافی است)', '');
   const ac = getAC();
   dSet('as', 'نشست صوتی و AudioContext', ac && ac.state === 'running' ? 'ok' : 'warn', 'audioSession: ' + sessionType() + ' · AudioContext: ' + (ac ? ac.state : 'ناموجود'), ac ? `sampleRate=${ac.sampleRate} baseLatency=${ac.baseLatency || '-'}` : '');
   // --- microphone
   let perm = 'نامشخص'; try { perm = (await navigator.permissions.query({ name: 'microphone' })).state; } catch (e) { }
-  const MT = 'میکروفون: اجازه + ضبط ۴ ثانیه';
+  const MT = 'میکروفون: اجازه + ضبط ۶ ثانیه';
   dSet('mic', MT, 'run', 'اجازه: ' + perm + ' — الان به فارسی بگویید: «سلام، امروز هوا چطوره؟»', '');
   const m = await micP; let rec = null;
   if (m.e) dSet('mic', MT, 'fail', 'میکروفون باز نشد: ' + m.e.name + (m.e.name === 'NotAllowedError' ? ' — اجازهٔ میکروفون را در Settings ← Safari (یا خود برنامه) بدهید' : ''), `${m.e.name}: ${m.e.message}\npermission=${perm}`);
   else {
     const tr = m.st.getAudioTracks()[0]; let ts = ''; try { ts = JSON.stringify(tr.getSettings()); } catch (e) { }
     const box = dButtons('mic', []); box.innerHTML = '<div class="meter"><i></i></div>'; const bar = box.querySelector('i');
-    rec = await recordUtterance(m.st, { maxMs: 4000, noSpeechMs: 1e9, silenceMs: 1e9, onLevel: (rms, pk) => { bar.style.width = Math.min(100, Math.round(pk * 150)) + '%'; } });
+    rec = await recordUtterance(m.st, { maxMs: 6000, noSpeechMs: 1e9, silenceMs: 1e9, onLevel: (rms, pk) => { bar.style.width = Math.min(100, Math.round(pk * 150)) + '%'; } });
     const good = rec.peak > 0.02 && (rec.pcmSamples > 0 || rec.bytes > 0);
     dSet('mic', MT, good ? 'ok' : 'fail', good ? `صدا ضبط شد ✓ — بلندترین سطح ${FA(Math.round(rec.peak * 100))}٪ · ${FA(Math.round(rec.bytes / 1024))} کیلوبایت` : (rec.peak < 0.002 ? 'هیچ صدایی از میکروفون نرسید (سکوت کامل)' : 'صدا خیلی ضعیف بود'),
       `permission=${perm}\ntrack: ${tr ? tr.label + ' readyState=' + tr.readyState + ' muted=' + tr.muted + ' enabled=' + tr.enabled : '-'}\nsettings: ${ts}\nPCM: samples=${rec.pcmSamples} rate=${rec.rate} peak=${rec.peak.toFixed(4)} rms=${rec.rms.toFixed(4)}\nMediaRecorder: ${rec.mime || '-'} bytes=${rec.bytes} chunks=${rec.chunks}\nused=${rec.source} AudioContext=${rec.acState} audioSession=${sessionType()}`);
     const r2 = rec; dButtons('mic', [['▶ پخش صدای ضبط‌شده', () => { unlockAudio(); AUD.src = URL.createObjectURL(r2.wav()); AUD.play().catch(e => logErr('diag-playback', e)); }]]);
   }
-  // --- speech recognition test (needs its own tap on iOS)
+  // --- on-device Persian STT on the recorded audio
+  await diagLocal(rec);
+  // --- browser speech recognition test (needs its own tap on iOS)
   diagSrButton();
   // --- LLM
   const LT = 'پاسخ فارسی از مغز آنلاین رایگان';
@@ -1469,13 +1555,29 @@ async function runDiag(micP) {
   await diagTts();
   // --- memory
   let est = ''; try { const q = await navigator.storage.estimate(); est = `storage used=${Math.round(q.usage / 1e6)}MB quota=${Math.round(q.quota / 1e6)}MB`; } catch (e) { }
-  const loaded = ['Piper' + (ttsFa ? ' ✓' : ' –'), 'Vision' + (visionMod ? ' (ماژول بار شده)' : ' –')].join(' · ');
-  dSet('mem', 'حافظه و مدل‌ها', 'ok', 'مدل‌های در حافظه: ' + loaded, `${est}\ndeviceMemory=${navigator.deviceMemory || '?'} jsHeap=${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) + 'MB' : '?'}\nنکته: در آیفون مدل بینایی هنگام تماس صوتی بار نمی‌شود. تشخیص گفتار مدل دانلودی ندارد (سرویس خود iOS).`);
+  const loaded = ['Piper' + (ttsFa ? ' ✓' : ' –'), 'Vosk' + (sttMod && sttMod.loaded() ? ' ✓' : ' –'), 'Vision' + (visionMod ? ' (ماژول بار شده)' : ' –')].join(' · ');
+  dSet('mem', 'حافظه و مدل‌ها', 'ok', 'مدل‌های در حافظه: ' + loaded, `${est}\ndeviceMemory=${navigator.deviceMemory || '?'} jsHeap=${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) + 'MB' : '?'}\nنکته: در آیفون مدل بینایی هنگام تماس صوتی بار نمی‌شود. مدل گفتار و مدل بینایی هم‌زمان در حافظه نگه داشته نمی‌شوند.`);
   dSet('as2', 'نشست صوتی بعد از آزمایش', 'ok', 'audioSession: ' + sessionType() + ' · AudioContext: ' + (getAC() ? getAC().state : '-'), '');
 }
-const STT_T = 'آزمایش تشخیص گفتار فارسی';
+const STT_T = 'آزمایش تشخیص گفتار مرورگر/سیری';
+async function diagLocal(rec) {
+  const LT = 'تشخیص گفتار فارسی داخل گوشی (Vosk): ضبط ← متن', IT = 'بارگذاری فایل‌های موتور (vendor)';
+  if (!LOCAL_OK) { dSet('loc', LT, 'fail', 'این مرورگر WebAssembly/Worker/میکروفون ندارد', ''); return; }
+  dSet('imp', IT, 'run', 'در حال بارگذاری…', '');
+  let m; try { m = await loadSttMod(); } catch (e) { dSet('imp', IT, 'fail', 'import ./stt-fa.js: ' + e.message, `${e.name}: ${e.message}`); return; }
+  const t0 = Date.now(); let err = null;
+  try { await m.load(f => dSet('imp', IT, 'run', 'دانلود (فقط بار اول، حدود ' + FA(Math.round(m.TOTAL_BYTES / 1e6)) + ' مگابایت)… ' + FA(Math.round(f * 100)) + '٪ (' + m.stage + ')', '')); } catch (e) { err = e; logErr('diag-stt-load', e); }
+  const lines = (m.log || []).map(x => (x.ok ? '✅ ' : '❌ ') + x.url + (x.ok ? ` (${x.cached ? 'از حافظهٔ گوشی' : 'دانلود'}${x.bytes ? ', ' + Math.round(x.bytes / 1e5) / 10 + ' MB' : ''}, ${x.ms}ms)` : ' — ' + x.err)).join('\n');
+  dSet('imp', IT, err ? 'fail' : 'ok', err ? 'خطا در مرحلهٔ ' + (err.stage || m.stage) + ': ' + err.message : 'همهٔ فایل‌ها از همین سایت بار شدند ✓ (' + FA(Math.round((Date.now() - t0) / 100) / 10) + ' ثانیه)', lines + (err ? `\n${err.name}: ${err.message}\nurl=${err.url || '-'}` : ''));
+  if (err) { dSet('loc', LT, 'fail', 'موتور بار نشد', ''); return; }
+  if (!rec || !rec.pcm16 || !rec.pcm16.length || rec.peak < 0.002) { dSet('loc', LT, 'warn', 'ضبطی با صدا برای آزمایش نبود', ''); return; }
+  dSet('loc', LT, 'run', 'در حال تبدیل گفتار به متن…', '');
+  try { const t1 = Date.now(); const txt = cleanAsr(await m.transcribe(rec.pcm16, 16000)); diag.sttText = txt;
+    dSet('loc', LT, txt ? 'ok' : 'warn', txt ? 'متن: «' + txt + '»' : 'متنی تشخیص داده نشد (واضح‌تر و نزدیک‌تر صحبت کنید)', `engine=${m.NAME || 'vosk'} audio=${(rec.pcm16.length / 16000).toFixed(1)}s samples16k=${rec.pcm16.length} peak=${rec.peak.toFixed(3)} transcribe=${Date.now() - t1}ms`);
+  } catch (e) { logErr('diag-stt', e); dSet('loc', LT, 'fail', 'تبدیل ممکن نشد: ' + e.message, `${e.name}: ${e.message}`); }
+}
 function diagSrButton() {
-  if (!SRClass) { dSet('stt', STT_T, 'fail', 'SpeechRecognition وجود ندارد' + (STANDALONE ? ' (حالت برنامهٔ صفحهٔ اصلی) — در Safari باز کنید یا از دیکتهٔ کیبورد استفاده کنید.' : ' — از دیکتهٔ کیبورد استفاده کنید.'), 'SpeechRecognition-unavailable'); return; }
+  if (!SRClass) { dSet('stt', STT_T, useLocal() ? 'warn' : 'fail', 'SpeechRecognition وجود ندارد' + (STANDALONE ? ' (حالت برنامهٔ صفحهٔ اصلی) — در Safari باز کنید یا از دیکتهٔ کیبورد استفاده کنید.' : ' — از دیکتهٔ کیبورد استفاده کنید.'), 'SpeechRecognition-unavailable'); return; }
   dSet('stt', STT_T, 'ask', 'روی دکمه بزنید و بلافاصله به فارسی بگویید: «سلام، امروز هوا چطوره؟»', 'lang=' + srLang());
   dButtons('stt', [['🎙 آزمایش تشخیص گفتار', () => diagSr([], true), 'btn']]);
 }
@@ -1690,7 +1792,7 @@ function renderMemory() {
 // settings + features
 function fillSettings() {
   $('st-prov').value = setting('prov', ''); $('st-key').value = setting('key', ''); $('st-model').value = setting('model', '');
-  $('st-tts').checked = ttsOn(); $('st-autosend').checked = autoSend(); $('st-favoice').value = faVoiceMode(); faVoiceStatus(); $('st-audout').value = LS.get('audOut', 'auto') === 'webaudio' ? 'webaudio' : 'auto';
+  $('st-tts').checked = ttsOn(); $('st-autosend').checked = autoSend(); $('st-favoice').value = faVoiceMode(); faVoiceStatus(); $('st-stt').value = sttMode(); sttStatus(); $('st-audout').value = LS.get('audOut', 'auto') === 'webaudio' ? 'webaudio' : 'auto';
   $('st-pcon').checked = setting('pcOn', false); $('st-pc').value = setting('pcBase', ''); $('st-pin').value = setting('pin', '');
   loadVoices && HAS_TTS && loadVoices();
   $('voiceinfo').textContent = 'تشخیص گفتار داخل برنامه: ' + (SRClass && !srBlocked() ? 'موجود (پشتیبانی واقعی به نسخهٔ iOS بستگی دارد)' : 'ناموجود — از میکروفون کیبورد آیفون استفاده کنید') +
@@ -1721,7 +1823,7 @@ async function renderFeatures() {
     ['یادداشت‌ها، فایل‌ها، حافظه، کارها (روی گوشی)', 'ok'],
     ['یادآوری‌ها (هنگام باز کردن برنامه)', 'part'],
     ['اعلان وقتی برنامه بسته است', 'no'],
-    ['تشخیص گفتار (سیری/مرورگر' + (STANDALONE && !SR ? ' — در Safari باز کنید' : '') + ')', (SR && !srBlocked()) ? 'part' : 'no'],
+    ['تشخیص گفتار (' + (useLocal() ? 'فارسی داخل گوشی' : 'سیری/مرورگر') + ')', useLocal() ? 'ok' : (SR && !srBlocked() && !srDead()) ? 'part' : 'no'],
     ['خواندن پاسخ با صدای فارسی', (HAS_TTS && pickVoice(true)) || pc ? 'ok' : HAS_TTS ? 'part' : 'no'],
     ['باز شدن بدون اینترنت', 'serviceWorker' in navigator && sec ? 'ok' : 'no'],
     ['کامپیوتر خانه (اختیاری)', pc ? 'ok' : 'no'],
@@ -1805,6 +1907,13 @@ async function forceUpdate() {   // unregister service workers + delete caches (
   location.replace(location.pathname.replace(/[^/]*$/, '') + '?v=' + Date.now());
 }
 $('upd-btn').onclick = forceUpdate;
+async function sttStatus() {
+  const el = $('sstatus'); if (!el) return; let dl = false; try { dl = await (await loadSttMod()).isDownloaded(); } catch (e) { }
+  el.textContent = 'موتور فعلی: ' + (useLocal() ? 'داخل گوشی (Vosk فارسی)' : 'سیری / مرورگر') + ' · مدل فارسی: ' + (dl ? 'دانلود شده ✅' : 'هنوز دانلود نشده') + (srDead() ? ' · سیری رد کرده بود (' + srDead() + ')' : '');
+}
+$('st-stt').onchange = e => { LS.set('sttEngine', e.target.value); if (e.target.value === 'browser') LS.set('srDead', ''); sttStatus(); renderFeatures(); };
+$('st-spre').onclick = async () => { const b = $('st-spre'); b.disabled = true; try { await ensureStt($('sstatus')); $('sstatus').textContent = 'تشخیص گفتار فارسی داخل گوشی آماده است ✅'; setTimeout(sttStatus, 2500); } catch (e) { $('sstatus').textContent = '❌ ' + e.message + errTag(e.name); } b.disabled = false; };
+$('st-sdel').onclick = async () => { if (!confirm('مدل تشخیص گفتار فارسی از گوشی پاک شود؟')) return; try { await (await loadSttMod()).clear(); } catch (e) { } sttStatus(); };
 $('st-audout').onchange = e => { LS.set('audOut', e.target.value); };
 $('st-diag').onclick = () => { location.hash = '#diag'; go('diag'); };
 $('dg-start').onclick = startDiag;
@@ -1832,7 +1941,7 @@ $('importinput').onchange = async e => {
   catch (err) { alert('خطا: ' + err.message); }
 };
 window.addEventListener('online', () => { refreshBadges(); updateOffline(); flushOutbox(); }); window.addEventListener('offline', () => { refreshBadges(); updateOffline(); });
-function stopAllVoice() { stopCall(); if (S) stopRec(true); stopSpeaking(); }
+function stopAllVoice() { stopCall(); if (S) stopRec(true); if (lRec) (lRec.cancel || lRec.stop)(); stopSpeaking(); }
 window.addEventListener('pagehide', stopAllVoice);
 document.addEventListener('visibilitychange', () => { if (document.hidden) suspendVoice(); if (!document.hidden) { refreshBadges(); notifyDue(); catchUpAgents(); } });
 
@@ -1854,4 +1963,4 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) suspe
   window.__ready = true;
 })();
 caches.open('transformers-cache').then(c => c.keys().then(ks => ks.forEach(k => { if (/whisper/i.test(k.url)) c.delete(k); }))).catch(() => { });
-window.__app = { recordUtterance, srLang, sendMedia, getAC, playPcm, diagReport, get lastPlay() { return lastPlay; }, speak, voiceCommand, parseFaReminder, searchConvs, openConv, newConv, renameConv, deleteConv, chatAsText, exportChatTxt, printChat, rotateMedia, cropMedia, ocrImage, flushOutbox, ttsRate, ttsVol, applyTheme, applyLang, T, regenerate, editLast, cancelEdit, get curConv() { return curConv; }, get pendingMedia() { return pendingMedia; }, imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
+window.__app = { recordUtterance, srLang, useLocal, sttMode, ensureStt, transcribeLocal, loadSttMod, get lastRec() { return lastRec; }, sendMedia, getAC, playPcm, diagReport, get lastPlay() { return lastPlay; }, speak, voiceCommand, parseFaReminder, searchConvs, openConv, newConv, renameConv, deleteConv, chatAsText, exportChatTxt, printChat, rotateMedia, cropMedia, ocrImage, flushOutbox, ttsRate, ttsVol, applyTheme, applyLang, T, regenerate, editLast, cancelEdit, get curConv() { return curConv; }, get pendingMedia() { return pendingMedia; }, imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };

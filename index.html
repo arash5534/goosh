@@ -13,7 +13,7 @@
 <link rel="apple-touch-icon" href="icons/goosh-180.png" sizes="180x180">
 <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
 <link rel="icon" href="icons/goosh-192.png" sizes="192x192" type="image/png">
-<link rel="stylesheet" href="style.css?v=1.7.0">
+<link rel="stylesheet" href="style.css?v=1.8.0">
 <title>گوش مصنوعی</title>
 </head>
 <body>
@@ -129,7 +129,9 @@
       <label><span data-i18n="lbVol">بلندی صدای گفتار</span>: <b id="st-vol-v">۱۰۰٪</b></label><input type="range" id="st-vol" min="0.1" max="1" step="0.1" value="1">
       <div class="muted">برای صدای داخل برنامه و صدای سیستم هر دو اعمال می‌شود. بلندی از بلندی صدای خود گوشی بیشتر نمی‌شود.</div>
       <label>تشخیص گفتار (میکروفون)</label>
-      <div class="muted">از تشخیص گفتار خود آیفون (سیری) استفاده می‌شود؛ هیچ مدلی دانلود نمی‌شود. اگر در حالت برنامهٔ صفحهٔ اصلی کار نکرد، برنامه را در Safari باز کنید یا از میکروفون کیبورد استفاده کنید.</div>
+      <select id="st-stt"><option value="auto">خودکار (آیفون: داخل گوشی · بقیه: مرورگر اگر کار کند)</option><option value="local">داخل گوشی — فارسی، رایگان، بدون سیری (Vosk)</option><option value="browser">تشخیص گفتار مرورگر/سیری</option></select>
+      <div class="row" style="margin-top:6px"><button class="btn2" id="st-spre">⬇️ دانلود تشخیص گفتار فارسی (≈۵۹ مگابایت، با Wi-Fi)</button><button class="del" id="st-sdel" style="flex:0 0 auto">حذف</button></div>
+      <div class="muted" id="sstatus"></div>
       <label>روش پخش صدا</label>
       <select id="st-audout"><option value="auto">خودکار — عنصر audio (مطمئن‌تر در آیفون)</option><option value="webaudio">Web Audio</option></select>
       <div class="muted">اگر صدایی نمی‌شنوید: کلید بی‌صدای کنار آیفون را خاموش کنید و صدای رسانه را بالا ببرید.</div>
@@ -158,7 +160,7 @@
       <div class="muted" id="bk-info"></div>
     </div>
     <div class="card"><h3 data-i18n="stFeat">وضعیت امکانات</h3><div id="feat"></div></div>
-    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون · رایگان · بدون کلید<br><b id="appver" style="direction:ltr;display:inline-block">نسخه 1.7.0 (goosh-v14)</b>
+    <div class="card muted">گوش مصنوعی — نسخهٔ مستقل آیفون · رایگان · بدون کلید<br><b id="appver" style="direction:ltr;display:inline-block">نسخه 1.8.0 (goosh-v14)</b>
       <div style="margin-top:8px"><button class="btn2" id="upd-btn" data-i18n="updBtn">🔄 به‌روزرسانی (دریافت آخرین نسخه)</button></div>
       <div class="muted">اگر برنامه نسخهٔ قدیمی را نشان می‌دهد این دکمه را بزنید. یادداشت‌ها و اطلاعات شما پاک نمی‌شود.</div></div>
   </section>
@@ -194,6 +196,6 @@
 <div id="printarea" dir="rtl" lang="fa"></div>
 <button id="tapplay" class="hidden">🔊 برای شنیدن پاسخ ضربه بزنید</button>
 <input type="file" id="importinput" class="hidden" accept=".json,application/json">
-<script type="module" src="app.js?v=1.7.0"></script>
+<script type="module" src="app.js?v=1.8.0"></script>
 </body>
 </html>
