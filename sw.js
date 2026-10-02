@@ -3,13 +3,13 @@
 //   other static files are cache-first (refreshed in the background). Offline: everything falls back to the cache.
 // - On activate it deletes every older cache and, when it is replacing an older build, reloads open windows
 //   (so a page still running an old build switches to the new one without the user doing anything).
-const VERSION = 'goosh-v13';
-const FILES = ['./', 'index.html', 'app.js?v=1.6.0', 'style.css?v=1.6.0', 'tts-fa.js?v=1.6.0', 'vision.js?v=1.6.0', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs',
+const VERSION = 'goosh-v14';
+const FILES = ['./', 'index.html', 'app.js?v=1.7.0', 'style.css?v=1.7.0', 'tts-fa.js?v=1.7.0', 'vision.js?v=1.7.0', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'vendor/ort.wasm.min.js', 'vendor/piper-phonemize.js', 'vendor/tesseract.min.js',
   'icons/icon.svg', 'icons/goosh-180.png', 'icons/goosh-192.png', 'icons/goosh-512.png', 'icons/goosh-maskable-512.png',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil((async () => {
-  const old = (await caches.keys()).filter(k => /^goosh-v\d+$/.test(k) && k !== VERSION);   // only old app caches; keep downloaded models (Persian voice, vision, Whisper)
+  const old = (await caches.keys()).filter(k => /^goosh-v\d+$/.test(k) && k !== VERSION);   // only old app caches; keep downloaded models (Persian voice, vision)
   await Promise.all(old.map(k => caches.delete(k)));
   await self.clients.claim();
   if (old.length) {   // upgrade from an older build → reload open windows into the new build
@@ -23,6 +23,7 @@ const NETWORK_FIRST = /(\/|index\.html|app\.js|tts-fa\.js|vision\.js|style\.css|
 self.addEventListener('fetch', e => {
   const u = new URL(e.request.url);
   if (e.request.method !== 'GET' || u.origin !== location.origin) return;   // APIs go straight to the network
+  if (/\/vendor\/[^/]+\.(wasm|data)$/.test(u.pathname)) return;   // big voice-engine binaries: tts-fa.js keeps them in its own cache (goosh-tts-v1)
   const put = r => { if (r.ok && (!u.search || e.request.mode !== 'navigate')) { const copy = r.clone(); caches.open(VERSION).then(c => c.put(e.request, copy)); } return r; };
   if (e.request.mode === 'navigate' || NETWORK_FIRST.test(u.pathname)) {
     e.respondWith(fetch(e.request, { cache: 'no-store' }).then(put).catch(() => caches.match(e.request, { ignoreSearch: true }).then(hit => hit || caches.match('index.html'))));

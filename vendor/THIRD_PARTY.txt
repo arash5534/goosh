@@ -1,0 +1,20 @@
+Self-hosted third-party files (unmodified except where noted). Served from this site so iPhone Safari does not need
+cross-origin ES-module imports from a CDN.
+
+ort.wasm.min.js, ort-wasm-simd.wasm, ort-wasm.wasm
+  onnxruntime-web 1.18.0 — MIT License — https://github.com/microsoft/onnxruntime
+  (from https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/)
+
+piper-phonemize.js  (re-bundled with esbuild to a classic script, global PiperPhonemize, target safari13)
+piper_phonemize.wasm, piper_phonemize.data
+  @diffusionstudio/vits-web 1.0.3 / @diffusionstudio/piper-wasm 1.0.0 — https://github.com/diffusionstudio/vits-web
+  contains piper-phonemize (https://github.com/rhasspy/piper-phonemize) and espeak-ng data
+  (GPL-3.0 — source: https://github.com/espeak-ng/espeak-ng)
+
+tesseract.min.js
+  tesseract.js 6.0.1 — Apache-2.0 — https://github.com/naptha/tesseract.js
+
+pdf.min.mjs, pdf.worker.min.mjs
+  pdf.js — Apache-2.0 — https://github.com/mozilla/pdf.js
+
+Persian voice weights (downloaded at runtime, not stored here): rhasspy/piper-voices fa_IR-amir-medium (Hugging Face).

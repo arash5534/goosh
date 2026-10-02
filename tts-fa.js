@@ -1,19 +1,33 @@
 // On-device Persian text-to-speech (Piper / VITS, voice fa_IR-amir-medium) running in the browser with WebAssembly.
-// Free, no key, no server: files come from public CDNs (jsDelivr, Hugging Face) once, then stay in the Cache API.
-const PIPER_JS = 'https://cdn.jsdelivr.net/npm/@diffusionstudio/vits-web@1.0.3/dist/piper-DeOu3H9E.js';   // espeak-ng phonemizer (emscripten)
-const PH_WASM = 'https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize.wasm';
-const PH_DATA = 'https://cdn.jsdelivr.net/npm/@diffusionstudio/piper-wasm@1.0.0/build/piper_phonemize.data';
-const ORT_JS = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/esm/ort.wasm.min.js';
-const ORT_DIR = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/';
-const ORT_WASM = ORT_DIR + 'ort-wasm-simd.wasm';
+// Free, no key, no server. 1.7.0: the engine files are SELF-HOSTED in ./vendor/ and loaded as classic <script>s (no cross-origin
+// dynamic import(): on real iPhones that failed with "TypeError: Importing a module script failed"). Only the voice weights come
+// from Hugging Face. Single-threaded WASM (GitHub Pages is not cross-origin isolated → no SharedArrayBuffer), no workers.
+const VENDOR = new URL('./vendor/', import.meta.url).href;
+const PIPER_JS = VENDOR + 'piper-phonemize.js';   // espeak-ng phonemizer (emscripten), bundled to a classic script (global PiperPhonemize)
+const PH_WASM = VENDOR + 'piper_phonemize.wasm';
+const PH_DATA = VENDOR + 'piper_phonemize.data';
+const ORT_JS = VENDOR + 'ort.wasm.min.js';            // onnxruntime-web 1.18.0 UMD build (global ort)
+const ORT_WASM = VENDOR + 'ort-wasm-simd.wasm', ORT_WASM_NOSIMD = VENDOR + 'ort-wasm.wasm';
 const VOICE = 'https://huggingface.co/rhasspy/piper-voices/resolve/main/fa/fa_IR/amir/medium/fa_IR-amir-medium.onnx';
 export const CACHE = 'goosh-tts-v1';   // the service worker and the update button keep this cache
-export const FILES = [[VOICE, 63531379], [VOICE + '.json', 4958], [PH_DATA, 9272533], [ORT_WASM, 10595041], [PH_WASM, 212008]];
+export const FILES = [[VOICE, 63531379], [VOICE + '.json', 4958], [PH_DATA, 18077249], [ORT_WASM, 10595041], [PH_WASM, 635212]];
 export const TOTAL_BYTES = FILES.reduce((a, f) => a + f[1], 0);
+export const URLS = { PIPER_JS, PH_WASM, PH_DATA, ORT_JS, ORT_WASM, VOICE };
+export let stage = 'idle';   // last loading stage (shown on the diagnostic screen)
+const stageErr = (st, url, e) => Object.assign(new Error(st + ' failed (' + url + '): ' + ((e && (e.name ? e.name + ': ' : '') + (e.message || e)) || '?')), { name: (e && e.name) || 'Error', stage: st, url });
+function loadScript(src, ready) {   // classic script → global
+  return new Promise((res, rej) => {
+    if (ready()) return res();
+    const s = document.createElement('script'); s.src = src; s.async = true;
+    s.onload = () => ready() ? res() : rej(new Error('script ran but its global is missing'));
+    s.onerror = () => rej(Object.assign(new Error('script could not be loaded'), { name: 'ScriptLoadError' }));
+    document.head.appendChild(s);
+  });
+}
 
 async function cached(url, onBytes) {   // Cache API first, else download with progress and store
   let c = null; try { c = await caches.open(CACHE); const hit = await c.match(url); if (hit) { const b = await hit.arrayBuffer(); onBytes && onBytes(b.byteLength, true); return b; } } catch (e) { }
-  const r = await fetch(url, { mode: 'cors' }); if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url.split('/').pop());
+  let r; try { r = await fetch(url, { mode: 'cors' }); } catch (e) { throw stageErr('download', url, e); } if (!r.ok) throw stageErr('download', url, new Error('HTTP ' + r.status));
   let buf;
   if (r.body && r.body.getReader) {
     const rd = r.body.getReader(), parts = []; let n = 0;
@@ -32,15 +46,21 @@ export function load(onProgress) {   // onProgress(fraction 0..1)
   if (loading) return loading;
   loading = (async () => {
     const got = {}; const tick = (i, n) => { got[i] = n; onProgress && onProgress(Math.min(1, Object.values(got).reduce((a, b) => a + b, 0) / TOTAL_BYTES)); };
+    stage = 'download';
     const [model, cfgBuf, phData, ortWasm, phWasm] = await Promise.all(FILES.map(([u], i) => cached(u, n => tick(i, n))));
     const cfg = JSON.parse(new TextDecoder().decode(cfgBuf));
-    const ort = await import(ORT_JS); const piper = await import(PIPER_JS);
-    ort.env.wasm.numThreads = 1;   // GitHub Pages is not cross-origin isolated → no threads
-    ort.env.wasm.wasmPaths = { 'ort-wasm-simd.wasm': URL.createObjectURL(new Blob([ortWasm], { type: 'application/wasm' })), 'ort-wasm.wasm': ORT_DIR + 'ort-wasm.wasm' };
-    const session = await ort.InferenceSession.create(new Uint8Array(model), { executionProviders: ['wasm'] });
+    caches.open(CACHE).then(c => c.keys().then(ks => ks.forEach(k => { if (!FILES.some(f => f[0] === k.url)) c.delete(k); }))).catch(() => { });   // drop the old CDN copies (≤1.6.0)
+    stage = 'ort-script'; try { await loadScript(ORT_JS, () => !!window.ort); } catch (e) { throw stageErr('ort-script', ORT_JS, e); }
+    stage = 'piper-script'; try { await loadScript(PIPER_JS, () => !!(window.PiperPhonemize && window.PiperPhonemize.createPiperPhonemize)); } catch (e) { throw stageErr('piper-script', PIPER_JS, e); }
+    const ort = window.ort, piper = window.PiperPhonemize;
+    ort.env.wasm.numThreads = 1; ort.env.wasm.proxy = false;   // no threads / no worker (no cross-origin isolation on GitHub Pages)
+    ort.env.wasm.wasmPaths = { 'ort-wasm-simd.wasm': URL.createObjectURL(new Blob([ortWasm], { type: 'application/wasm' })), 'ort-wasm.wasm': ORT_WASM_NOSIMD };
+    stage = 'onnx-session'; let session;
+    try { session = await ort.InferenceSession.create(new Uint8Array(model), { executionProviders: ['wasm'] }); } catch (e) { throw stageErr('onnx-session', VOICE, e); }
+    stage = 'ready';
     S = { ort, piper, cfg, session, phData, phWasm, sampleRate: cfg.audio.sample_rate };
     return S;
-  })().catch(e => { loading = null; throw e; });
+  })().catch(e => { loading = null; stage = 'failed: ' + (e.stage || stage); throw e; });
   return loading;
 }
 async function phonemize(text) {   // espeak-ng phonemes → Piper ids; one output line per sentence

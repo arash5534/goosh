@@ -25,6 +25,11 @@ const LS = {   // small device-local preferences (voice, permissions)
 
 // ------------------------------------------------------------------ permissions (what the assistant may use; saved on this phone)
 // A public static page holds NO secrets and can never send anything by itself: mail/chat only prepares drafts the user sends.
+function logErr(where, e) {   // rolling error log (last 60), shown on the 🩺 diagnostic screen
+  try { const l = JSON.parse(localStorage.getItem('goosh.errlog') || '[]'); l.push({ t: new Date().toISOString(), w: where, m: String(e && e.name ? e.name + ': ' + (e.message || '') : (e && e.message) || e).slice(0, 300) }); localStorage.setItem('goosh.errlog', JSON.stringify(l.slice(-60))); } catch (x) { }
+}
+window.addEventListener('error', e => logErr('window', e.error || e.message));
+window.addEventListener('unhandledrejection', e => logErr('promise', e.reason));
 const PERMS = [
   { k: 'web', name: 'وب', icon: '🌐', def: true, tools: ['web_search', 'read_webpage', 'wikipedia', 'get_weather', 'get_news', 'currency_rate'],
     desc: 'جستجوی وب (DuckDuckGo از طریق Jina Reader)، خواندن صفحه، ویکی‌پدیا، آب‌وهوا، اخبار و نرخ ارز — رایگان و بدون کلید.' },
@@ -473,7 +478,7 @@ async function videoFromFile(file, n = VIDEO_FRAMES) {   // N evenly spaced fram
   finally { v.removeAttribute('src'); try { v.load(); } catch (e) { } v.remove(); URL.revokeObjectURL(url); }
 }
 let visionMod = null;
-const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.6.0').then(m => (visionMod = m));
+const loadVision = () => window.__visionStub ? Promise.resolve(window.__visionStub) : visionMod ? Promise.resolve(visionMod) : import('./vision.js?v=1.7.0').then(m => (visionMod = m));
 async function describeMedia(md, status) {   // on-device captions (Florence-2) → stored with the message
   const V = await loadVision();
   if (!(await V.isDownloaded())) status('دانلود مدل بینایی روی گوشی (فقط بار اول، حدود ' + FA(Math.round(V.APPROX_BYTES / 1e6)) + ' مگابایت)… ۰٪');
@@ -484,6 +489,7 @@ async function describeMedia(md, status) {   // on-device captions (Florence-2) 
     caps.push(await V.caption(md.images[i], md.kind !== 'video'));
   }
   md.caption = caps;
+  if (call.on) unloadVision();   // voice call: free the vision model again before the next listening turn
 }
 function mediaContent(m, direct) {   // what the model receives for a message with a photo/video
   const md = m.media, text = m.content;
@@ -492,6 +498,7 @@ function mediaContent(m, direct) {   // what the model receives for a message wi
     return [{ type: 'text', text: text + note }, ...md.images.map(u => ({ type: 'image_url', image_url: { url: u } }))];
   }
   const caps = md.caption || [];
+  if (!caps.length && md.captionErr) return text + '\n\n' + `[کاربر ${md.kind === 'video' ? 'یک ویدیو' : 'یک عکس'} پیوست کرده است، اما دیدن خودکار آن روی گوشی ممکن نشد، پس محتوای آن را نمی‌دانی.]` + (md.ocr ? `\n[متن داخل عکس (OCR): "${md.ocr}"]` : '') + '\nوجود پیوست را بپذیر (نگو که چیزی پیوست نشده)؛ اگر برای انجام درخواست به محتوای آن نیاز داری، کوتاه بپرس که در آن چه دیده می‌شود.';
   const desc = md.kind === 'video'
     ? `[ویدیوی ${Math.round(md.duration)} ثانیه‌ای پیوست شده. توضیح خودکار ${caps.length} فریم پشت‌سرهم (تولیدشده روی گوشی، به انگلیسی، ممکن است ناقص باشد):\n` + caps.map((c, i) => `${i + 1}) ثانیهٔ ${md.times[i]}: ${c}`).join('\n') + ']'
     : `[عکس پیوست شده. توضیح خودکار عکس (تولیدشده روی گوشی، به انگلیسی، ممکن است ناقص باشد): "${caps[0] || ''}"]` + (md.ocr ? `\n[متن داخل عکس (OCR): "${md.ocr}"]` : '');
@@ -542,7 +549,10 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
     const direct = visionCapable(chain()[0]);   // user's own vision-capable key → send the real images; otherwise describe them on the phone
     if (um.media && um.media.kind === 'image' && !um.media.ocr && /متن|نوشته|بخوان|ocr|\btext\b/i.test(text)) { try { um.media.ocr = await ocrImage(um.media.images[0], msg => { wait.textContent = msg; }); } catch (e) { } }
     checkStop();
-    if (um.media && !direct && !um.media.caption) await describeMedia(um.media, msg => { wait.textContent = msg; });
+    if (um.media && !direct && !um.media.caption) {
+      try { await describeMedia(um.media, msg => { wait.textContent = msg; }); delete um.media.captionErr; }
+      catch (e) { if (e.stopped) throw e; logErr('vision', e); um.media.captionErr = (e.name ? e.name + ': ' : '') + (e.message || e); addMsg('info', 'دیدن خودکار ' + (um.media.kind === 'video' ? 'ویدیو' : 'عکس') + ' روی گوشی ممکن نشد؛ پیام با اطلاع از پیوست فرستاده می‌شود. (با کلید شخصی یک سرویس تصویری در تنظیمات، عکس مستقیم فرستاده می‌شود.)' + errTag(um.media.captionErr)); }
+    }
     checkStop(); save('history');
     const upto = D.history.indexOf(um);
     const hist = D.history.slice(0, upto + 1).filter(m => m.role === 'user' || m.role === 'assistant').map((m, i, arr) => ({ role: m.role, content: m.media ? mediaContent(m, direct && m === um) : m.llm && i >= arr.length - 3 ? m.llm : m.content }));
@@ -568,6 +578,7 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
     if (!opts.fromCall && ttsOn()) speak(res.reply);   // voice-call mode speaks the reply itself
   } catch (e) {
     wait.remove();
+    if (!e.stopped) logErr('send', e);
     if (e.stopped) addMsg('info', T('stopped')); else addMsg('error', 'پاسخی دریافت نشد: ' + e.message + errTag(e.name));
     if (!um.media) { $('t').value = text; growInput(); } else lastFailedMedia = um;
     const k = D.history.indexOf(um); if (k >= 0) D.history.splice(k, 1); save('history');
@@ -581,13 +592,20 @@ async function send(text, llmText, opts = {}) {   // resolves to the reply text 
 // ------------------------------------------------------------------ voice: speech-to-text, text-to-speech, voice-call loop
 // iOS notes: recognition.start() must run synchronously inside a tap; speechSynthesis must be "unlocked" by a tap;
 // in home-screen (standalone) mode some iOS versions lack webkitSpeechRecognition or fail with service-not-allowed.
-const APP_VERSION = '1.6.0 (goosh-v13)';
+const APP_VERSION = '1.7.0 (goosh-v14)';
 const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
 const HAS_TTS = 'speechSynthesis' in window && 'SpeechSynthesisUtterance' in window;
 const STANDALONE = navigator.standalone === true || !!(window.matchMedia && matchMedia('(display-mode: standalone)').matches);
 const AR_G = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g;
 const isFaText = s => { const a = (String(s).match(AR_G) || []).length, l = (String(s).match(/[A-Za-z]/g) || []).length; return a > 0 && a >= l * 0.5; };
 const sttLang = () => LS.get('sttLang', 'fa-IR') === 'en-US' ? 'en-US' : 'fa-IR';
+// Persian recognition language: 'fa-IR' first; if the engine answers language-not-supported we retry once with 'fa' and remember it.
+const srLang = () => sttLang() === 'en-US' ? 'en-US' : (LS.get('srFaLang', 'fa-IR') === 'fa' ? 'fa' : 'fa-IR');
+function srLangFallback(s) {   // → 'retry' (switched fa-IR → fa), 'none' (both rejected) or '' (not a language error)
+  if (s.error !== 'language-not-supported' || !/^fa/.test(s.lang || '')) return '';
+  if (s.lang === 'fa-IR') { LS.set('srFaLang', 'fa'); logErr('sr-lang', 'fa-IR rejected (language-not-supported) → trying fa'); return 'retry'; }
+  LS.set('srFaLang', 'fa-IR'); logErr('sr-lang', 'fa also rejected (language-not-supported)'); return 'none';
+}
 const ttsOn = () => LS.get('tts', true);
 const autoSend = () => LS.get('autoSend', true);
 const sess = { get: k => { try { return sessionStorage.getItem('goosh.' + k); } catch (e) { return null; } }, set: (k, v) => { try { sessionStorage.setItem('goosh.' + k, v); } catch (e) { } } };
@@ -599,21 +617,29 @@ const STT_ERR = {
   'no-speech': 'صدایی شنیده نشد. دوباره روی 🎤 بزنید و بلافاصله صحبت کنید.',
   'network': 'تشخیص گفتار به اینترنت نیاز دارد و اتصال برقرار نشد. اینترنت را بررسی کنید یا از میکروفون کیبورد آیفون استفاده کنید.',
   'audio-capture': 'میکروفون در دسترس نیست (شاید برنامهٔ دیگری، مثلاً تماس تلفنی، از آن استفاده می‌کند). دوباره امتحان کنید.',
-  'language-not-supported': 'این زبان برای تشخیص گفتار در این گوشی پشتیبانی نمی‌شود. زبان را با دکمهٔ «فا/EN» عوض کنید یا از میکروفون کیبورد آیفون استفاده کنید.',
+  'language-not-supported': 'تشخیص گفتار این گوشی زبان فارسی را نپذیرفت: هم «fa-IR» و هم «fa» رد شد (language-not-supported). راه جایگزین: روی کادر پیام بزنید و از میکروفون 🎙 کیبورد آیفون (دیکته) استفاده کنید، یا زبان را با دکمهٔ «فا/EN» عوض کنید.',
+  'service-not-allowed': 'iOS اجازهٔ استفاده از سرویس تشخیص گفتار را به این برنامه نداد (service-not-allowed). مطمئن شوید Siri و دیکته روشن است: Settings ← Siri، و Settings ← General ← Keyboard ← Enable Dictation؛ و Settings ← Privacy & Security ← Speech Recognition برای Safari روشن باشد.',
 };
-const DICTATION_HINT = 'تشخیص گفتار داخل برنامه در این گوشی' + (STANDALONE ? ' (در حالت برنامهٔ صفحهٔ اصلی)' : '') + ' در دسترس نیست. راه جایگزین: روی کادر پیام بزنید و دکمهٔ میکروفون 🎙 کیبورد آیفون (دیکته) را بزنید. مطمئن شوید «Siri و دیکته» روشن است: Settings ← General ← Keyboard ← Enable Dictation، و Settings ← Siri. (گزینهٔ دیگر: «Whisper داخل گوشی» در تنظیمات همین برنامه.)';
+const DICTATION_HINT = 'تشخیص گفتار داخل برنامه در این گوشی در دسترس نیست. راه جایگزین: روی کادر پیام بزنید و دکمهٔ میکروفون 🎙 کیبورد آیفون (دیکته) را بزنید. مطمئن شوید «Siri و دیکته» روشن است: Settings ← General ← Keyboard ← Enable Dictation، و Settings ← Siri.';
+const SAFARI_URL = location.origin + location.pathname.replace(/[^/]*$/, '') + '?view=chat';
+const STANDALONE_SR_MSG = 'در حالت «برنامهٔ صفحهٔ اصلی» (آیکون روی صفحه)، iOS تشخیص گفتار داخل برنامه را در اختیار این برنامه نمی‌گذارد. همین برنامه را در یک زبانهٔ معمولی Safari باز کنید؛ آنجا تشخیص گفتار معمولاً کار می‌کند.\nتوجه: گفتگوها و تنظیمات در زبانهٔ Safari جدا از برنامهٔ صفحهٔ اصلی ذخیره می‌شوند (برای انتقال: تنظیمات ← پشتیبان‌گیری).\nراه دیگر: روی کادر پیام بزنید و میکروفون 🎙 کیبورد آیفون (دیکته) را بزنید.';
 const errTag = code => code ? '\n[کد خطا: ' + code + ']' : '';
-function dictationFallback(code) {
-  try { $('t').focus(); } catch (e) { }   // inside a tap this opens the keyboard, where the dictation mic lives
-  const full = sess.get('dictHint') !== '1'; sess.set('dictHint', '1');
-  const el = addMsg('info', (full ? DICTATION_HINT : 'روی کادر پیام بزنید و از میکروفون 🎙 کیبورد آیفون استفاده کنید.') + errTag(code));
-  if (!setting('whisper', false) && navigator.mediaDevices && window.MediaRecorder) {   // real fallback: record + transcribe ON the phone (free, no server, no key)
-    const b = document.createElement('button'); b.className = 'btn2 sm'; b.style.marginTop = '6px'; b.style.display = 'block';
-    b.textContent = '🎙 استفاده از Whisper داخل گوشی (رایگان، بار اول حدود ۸۰ مگابایت دانلود)';
-    b.onclick = () => { D.settings.whisper = true; save('settings'); if ($('st-whisper')) $('st-whisper').checked = true; b.remove(); whisperRecord(); };
-    el.appendChild(b);
-  }
+function safariButtons(el) {   // «open in Safari» (x-safari-https: scheme, iOS 17+) + copy-link fallback
+  const row = document.createElement('div'); row.className = 'row'; row.style.marginTop = '6px';
+  const a = document.createElement('a'); a.className = 'btn2 sm'; a.id = 'open-safari'; a.textContent = '🧭 باز کردن در Safari'; a.href = 'x-safari-' + SAFARI_URL; a.target = '_blank'; a.rel = 'noopener';
+  const c = document.createElement('button'); c.className = 'btn2 sm'; c.textContent = '📋 کپی لینک برای Safari';
+  c.onclick = () => copyText(SAFARI_URL, c);
+  row.append(a, c); el.appendChild(row);
 }
+function srUnavailable(code, quiet) {   // recognition missing / refused → clear Persian message (+ Safari option in home-screen mode)
+  logErr('sr-unavailable', code + (STANDALONE ? ' (standalone)' : ''));
+  if (!quiet) { try { $('t').focus(); } catch (e) { } }   // inside a tap this opens the keyboard, where the dictation mic lives
+  const base = STANDALONE ? STANDALONE_SR_MSG : code === 'service-not-allowed' ? STT_ERR['service-not-allowed'] + '\n' + DICTATION_HINT : DICTATION_HINT;
+  const el = addMsg('info', base + errTag(code));
+  if (STANDALONE) safariButtons(el);
+  return el;
+}
+const dictationFallback = code => srUnavailable(code);
 function voiceErr(code) { addMsg('info', (STT_ERR[code] || 'خطای میکروفون.') + errTag(code)); }
 const growInput = () => $('t').dispatchEvent(new Event('input'));
 function setMicUI(on) { $('mic').classList.toggle('rec', !!on); $('mic').textContent = on ? '⏹' : '🎤'; }
@@ -631,19 +657,22 @@ function getRec(fresh) {
     if (!S) return; let fin = '', tmp = '';
     for (let i = 0; i < e.results.length; i++) { const r = e.results[i]; if (r.isFinal) fin += r[0].transcript + ' '; else tmp += r[0].transcript + ' '; }
     S.started = true; S.text = (fin + tmp).replace(/\s+/g, ' ').trim();
-    $('t').value = (S.prefix ? S.prefix + ' ' : '') + S.text; growInput();   // interim text shows live in the input
+    if (S.onText) S.onText(S.text);
+    if (!S.quiet) { $('t').value = (S.prefix ? S.prefix + ' ' : '') + S.text; growInput(); }   // interim text shows live in the input
   };
   R.onerror = e => { if (S) S.error = e.error || 'unknown'; };
   R.onend = () => endSession();
   return R;
 }
-function endSession() { const s = S; if (!s) return; S = null; clearTimeout(s.guard); setMicUI(false); s.onDone(s); }
-function startRec(onDone, gesture, keepPrefix) {
+function endSession() { const s = S; if (!s) return; S = null; clearTimeout(s.guard); setMicUI(false); setSession('playback'); if (s.error && s.error !== 'no-speech' && s.error !== 'aborted') logErr('sr', s.error + ' lang=' + s.lang + (s.startErr ? ' start=' + s.startErr : '')); s.onDone(s); }
+function startRec(onDone, gesture, keepPrefix, opts) {
   if (S) return false;                                   // guard against double-start
-  S = { text: '', error: null, started: false, prefix: keepPrefix ? $('t').value.trim() : '', onDone, gesture, t0: Date.now() };
-  try { const r = getRec(false); r.lang = sttLang(); r.start(); }
+  const lang = (opts && opts.lang) || srLang();
+  S = { text: '', error: null, started: false, prefix: keepPrefix ? $('t').value.trim() : '', onDone, gesture, t0: Date.now(), lang, quiet: !!(opts && opts.quiet), onText: opts && opts.onText };
+  setSession('play-and-record');
+  try { const r = getRec(IOS); r.lang = lang; r.start(); }   // iOS: a fresh one-shot instance for every turn
   catch (err) {
-    try { const r2 = getRec(true); r2.lang = sttLang(); r2.start(); }   // InvalidStateError etc.: fresh instance, one retry
+    try { const r2 = getRec(true); r2.lang = lang; r2.start(); }   // InvalidStateError etc.: fresh instance, one retry
     catch (err2) { S.error = /NotAllowed|Security/i.test(err2.name || '') ? 'not-allowed' : 'start-failed'; S.startErr = err2.name || String(err2); endSession(); return false; }
   }
   setMicUI(true); return true;
@@ -660,9 +689,7 @@ function micClick() {
   unlockTTS(); stopSpeaking();                            // tapping the mic always silences the assistant
   if (call.on) return callMicTap();
   if (S) { stopRec(false); return; }                      // tap again to stop
-  if (wRec) { wRec.stop(); return; }
-  if (setting('whisper', false)) return whisperRecord();
-  if (!SRClass) return dictationFallback('SpeechRecognition-unavailable');
+  if (!SRClass) return srUnavailable('SpeechRecognition-unavailable');
   if (srBlocked()) return dictationFallback(sess.get('srBlockedCode') || 'service-not-allowed');
   if (!LS.get('micPrimed', false) && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) return primeMicThenListen();
   startRec(singleDone, true, true);                       // synchronous inside the tap (iOS requirement)
@@ -693,10 +720,16 @@ function primeMicThenListen() {
 }
 function singleDone(s) {
   if (s.cancelled) return;
-  const e = s.error;
+  const e = s.error, lf = srLangFallback(s);
+  if (lf === 'retry') {   // fa-IR rejected → try 'fa' right away (if iOS refuses a start outside the tap, ask for one more tap)
+    addMsg('info', 'زبان «fa-IR» پذیرفته نشد؛ با «fa» دوباره امتحان می‌کنم… حالا صحبت کنید.');
+    if (!startRec(s2 => { if (s2.error === 'start-failed' || s2.error === 'not-allowed') return addMsg('info', 'زبان «fa» تنظیم شد. دوباره روی 🎤 بزنید و صحبت کنید.' + errTag(s2.startErr || s2.error)); singleDone(s2); }, false, true)) { }
+    return;
+  }
+  if (lf === 'none') return addMsg('info', STT_ERR['language-not-supported'] + errTag('language-not-supported fa-IR,fa'));
   if (e === 'service-not-allowed' || e === 'start-failed' || (!e && !s.started && !s.text)) {
     const code = e === 'start-failed' ? 'start-failed:' + (s.startErr || '?') : e || 'ended-without-start';
-    if (e) markSrBlocked(code); return dictationFallback(code);
+    if (e) markSrBlocked(code); return srUnavailable(code);
   }
   if (e && e !== 'aborted') return voiceErr(e);
   if (s.text && voiceCommand(s.text, false)) { $('t').value = s.prefix || ''; growInput(); return; }   // local Persian command (not sent to the model)
@@ -709,17 +742,18 @@ const call = { on: false, phase: '', noSpeech: 0, gen: 0 };
 const MAX_NOSPEECH = 3;
 function setPhase(p) {
   call.phase = p; const el = $('callstate');
-  el.textContent = { listening: '🎙 در حال گوش دادن…', thinking: '💭 در حال فکر کردن…', speaking: '🔊 در حال صحبت…', paused: '⏸ منتظر شما' }[p] || '';
+  el.textContent = { listening: '🎙 در حال گوش دادن…', transcribing: '✍️ در حال تبدیل گفتار به متن…', thinking: '💭 در حال فکر کردن…', speaking: '🔊 در حال صحبت…', paused: '⏸ منتظر شما' }[p] || '';
   el.className = 'pill callstate ' + p + (call.on && p ? '' : ' hidden');
 }
 function startCall() {
   unlockTTS(); stopSpeaking();
-  if (!SRClass || srBlocked()) { addMsg('info', 'تماس صوتی به تشخیص گفتار داخل برنامه نیاز دارد.\n' + DICTATION_HINT + errTag(!SRClass ? 'SpeechRecognition-unavailable' : sess.get('srBlockedCode'))); return; }
+  if (!SRClass || srBlocked()) { addMsg('info', 'تماس صوتی به تشخیص گفتار داخل برنامه نیاز دارد.'); srUnavailable(!SRClass ? 'SpeechRecognition-unavailable' : sess.get('srBlockedCode') || 'service-not-allowed'); return; }
   if (S) stopRec(true);
-  if (wRec) wRec.stop();
   call.on = true; call.noSpeech = 0; call.gen++;
   $('callbtn').textContent = T('endCall'); $('callbtn').classList.add('oncall');
-  callListen(true);                                       // first start: synchronously inside the tap
+  callListen(true);                                       // first start: synchronously inside the tap (getUserMedia / recognition.start)
+  unloadVision();                                         // memory: no vision model during a call
+  if (IOS && !LS.get('silentHint', false)) { LS.set('silentHint', true); addMsg('info', '🔈 اگر صدای پاسخ را نمی‌شنوید: کلید بی‌صدا (کنار آیفون) را خاموش کنید و صدای گوشی را بالا ببرید. برای بررسی کامل: تنظیمات ← 🩺 بررسی صدا.'); }
 }
 function stopCall(msg) {
   if (!call.on) return;
@@ -733,16 +767,18 @@ function callListen(gesture) {
   if (!call.on) return;
   $('tapcont').classList.add('hidden'); $('t').value = ''; growInput(); setPhase('listening');
   const gen = call.gen;
-  startRec(s => callHeard(s, gen), gesture, false);
+  startRec(s => callHeard(s, gen), gesture, false);   // one shot per turn; restarted after every reply
 }
 function callHeard(s, gen) {
   if (s.cancelled || !call.on || gen !== call.gen) return;
-  const e = s.error;
+  const e = s.error, lf = srLangFallback(s);
+  if (lf === 'retry') { addMsg('info', 'زبان «fa-IR» پذیرفته نشد؛ با «fa» ادامه می‌دهم.'); return callListen(false); }   // refused outside a tap → tap-to-continue
+  if (lf === 'none') return stopCall(STT_ERR['language-not-supported'] + errTag('language-not-supported fa-IR,fa'));
   if (e === 'not-allowed' || e === 'service-not-allowed' || e === 'start-failed' || (!e && !s.started && !s.text)) {
     if (s.gesture) {                                      // refused even inside a tap → really unavailable
       const code = e === 'start-failed' ? 'start-failed:' + (s.startErr || '?') : e || 'ended-without-start';
       if (e === 'not-allowed') return stopCall(STT_ERR['not-allowed'] + errTag(code));
-      markSrBlocked(code); return stopCall(DICTATION_HINT + errTag(code));
+      markSrBlocked(code); stopCall('تماس پایان یافت.'); srUnavailable(code, true); return;
     }
     return pauseCall('', e === 'start-failed' ? s.startErr : e);   // auto-restart refused outside a gesture → let the user tap
   }
@@ -767,29 +803,108 @@ function callMicTap() {
   else if (call.phase === 'listening' && S) stopRec(false);   // "I'm done talking" → send now
 }
 
-// ---- optional on-device Whisper (existing feature; free, runs in the browser)
-let wRec = null, wChunks = [], asr = null;
-async function whisperRecord() {
-  if (wRec) { wRec.stop(); return; }
-  let gumErr = null; const stream = await navigator.mediaDevices.getUserMedia({ audio: true }).catch(e => { gumErr = e; return null; });
-  if (!stream) { addMsg('error', 'اجازهٔ میکروفون داده نشد (Settings ← Safari ← Microphone).' + errTag(gumErr && gumErr.name)); return; }
-  const type = ['audio/mp4', 'audio/webm'].find(t => MediaRecorder.isTypeSupported(t)) || '';
-  wRec = new MediaRecorder(stream, type ? { mimeType: type } : {}); wChunks = [];
-  wRec.ondataavailable = e => wChunks.push(e.data);
-  wRec.onstop = async () => {
-    stream.getTracks().forEach(t => t.stop()); setMicUI(false); wRec = null;
-    const w = addMsg('info', asr ? 'در حال تبدیل گفتار به متن…' : 'بار اول: دانلود مدل Whisper (چند دقیقه)…');
+// ================================================================== 1.7.0: robust iPhone voice path (free, keyless, on-device)
+// Speech-to-text = the browser's own SpeechRecognition only (no downloaded engine). Audio: AudioContext resumed + silent buffer
+// in the same tap, <audio>+WAV first for output, navigator.audioSession 'play-and-record' while listening / 'playback' otherwise.
+// getUserMedia + recordUtterance below are used only by the diagnostic screen (mic permission + level test).
+const IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let AC = null;
+function getAC() {
+  if (AC) return AC; const C = window.AudioContext || window.webkitAudioContext; if (!C) return null;
+  try { AC = new C(); AC.onstatechange = () => { if (AC.state !== 'running') logErr('audiocontext', 'state=' + AC.state); }; } catch (e) { logErr('AudioContext', e); AC = null; }
+  return AC;
+}
+function setSession(type) { try { if (navigator.audioSession && navigator.audioSession.type !== type) navigator.audioSession.type = type; } catch (e) { logErr('audioSession', e); } }
+const sessionType = () => { try { return navigator.audioSession ? String(navigator.audioSession.type) + (navigator.audioSession.state ? '/' + navigator.audioSession.state : '') : 'ناموجود (iOS قدیمی‌تر از ۱۷)'; } catch (e) { return 'خطا'; } };
+function unlockAudio() {   // MUST run synchronously inside a tap: resume the AudioContext and play a silent buffer
+  const ac = getAC(); if (!ac) return;
+  try { if (ac.state !== 'running') ac.resume().catch(e => logErr('ac.resume', e)); const b = ac.createBuffer(1, 1, ac.sampleRate); const src = ac.createBufferSource(); src.buffer = b; src.connect(ac.destination); src.start(0); } catch (e) { logErr('unlockAudio', e); }
+}
+function getMic() {   // getUserMedia is invoked synchronously (first turn: inside the tap). Tracks are stopped after every recording.
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return Promise.reject(Object.assign(new Error('getUserMedia ناموجود است'), { name: 'NotSupportedError' }));
+  setSession('play-and-record');
+  return navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+}
+function resample16k(pcm, rate) {
+  if (!pcm.length || Math.abs(rate - 16000) < 1) return pcm;
+  const r = rate / 16000, n = Math.floor(pcm.length / r), out = new Float32Array(n);
+  for (let i = 0; i < n; i++) { const a = Math.floor(i * r), b = Math.max(a + 1, Math.min(pcm.length, Math.floor((i + 1) * r))); let t = 0; for (let k = a; k < b; k++) t += pcm[k]; out[i] = t / (b - a); }
+  return out;
+}
+function pcmWav(pcm, rate) {   // Float32 → 16-bit mono WAV blob
+  const dv = new DataView(new ArrayBuffer(44 + pcm.length * 2)); const w = (o, str) => { for (let i = 0; i < str.length; i++) dv.setUint8(o + i, str.charCodeAt(i)); };
+  w(0, 'RIFF'); dv.setUint32(4, 36 + pcm.length * 2, true); w(8, 'WAVE'); w(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true); dv.setUint32(24, rate, true); dv.setUint32(28, rate * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true); w(36, 'data'); dv.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) dv.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 0x7fff, true);
+  return new Blob([dv.buffer], { type: 'audio/wav' });
+}
+// Record one utterance. Raw PCM via ScriptProcessor (works on iOS where MediaRecorder sometimes yields empty data) + MediaRecorder
+// with 250 ms timeslices in parallel. Stops on ~1.2 s of silence after speech, on maxMs, on no speech, or via handle.stop()/cancel().
+function recordUtterance(stream, o = {}) {
+  const silenceMs = o.silenceMs || 1200, maxMs = o.maxMs || 20000, noSpeechMs = o.noSpeechMs || 8000;
+  return new Promise(resolve => {
+    const ac = getAC(); const chunks = []; let n = 0, peak = 0, sumSq = 0, speechAt = 0, lastLoud = 0, floor = 0.003, done = false, flowing = false;
+    const t0 = performance.now(); let src = null, proc = null, sink = null, mr = null, mrChunks = [], bytes = 0, mime = '';
+    const vad = rms => {
+      const now = performance.now() - t0;
+      if (now < 350) { floor = Math.max(floor, Math.min(rms, 0.05)); return; }
+      const th = Math.max(0.012, floor * 2.5);
+      if (rms > th) { if (!speechAt) speechAt = now; lastLoud = now; }
+      if (speechAt && now - lastLoud > silenceMs) finish('silence');
+    };
     try {
-      if (!asr) { const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.7.5/dist/transformers.min.js'); asr = await pipeline('automatic-speech-recognition', 'onnx-community/whisper-base', { dtype: 'q8' }); }
-      const buf = await new Blob(wChunks).arrayBuffer();
-      const ac = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-      const audio = (await ac.decodeAudioData(buf)).getChannelData(0);
-      const out = await asr(audio, { language: sttLang() === 'en-US' ? 'english' : 'persian', task: 'transcribe' });
-      w.remove(); const txt = out.text.trim();
-      if (!txt) addMsg('info', 'متوجه نشدم.'); else if (voiceCommand(txt, false)) { } else if (autoSend()) send(txt); else { $('t').value = txt; growInput(); }
-    } catch (e) { w.remove(); addMsg('error', 'Whisper: ' + e.message + errTag(e.name)); }
-  };
-  wRec.start(); setMicUI(true); setTimeout(() => wRec && wRec.stop(), 30000);
+      if (!ac) throw new Error('no AudioContext');
+      if (ac.state !== 'running') ac.resume().catch(() => { });
+      src = ac.createMediaStreamSource(stream); proc = ac.createScriptProcessor(4096, 1, 1); sink = ac.createGain(); sink.gain.value = 0;
+      proc.onaudioprocess = e => {
+        if (done) return; const d = e.inputBuffer.getChannelData(0); chunks.push(new Float32Array(d)); n += d.length; flowing = true;
+        let q = 0, pk = 0; for (let i = 0; i < d.length; i++) { const v = d[i]; q += v * v; const a = v < 0 ? -v : v; if (a > pk) pk = a; }
+        sumSq += q; if (pk > peak) peak = pk; const rms = Math.sqrt(q / d.length); o.onLevel && o.onLevel(rms, pk); vad(rms);
+      };
+      src.connect(proc); proc.connect(sink); sink.connect(ac.destination);
+    } catch (e) { logErr('pcm-capture', e); }
+    if (window.MediaRecorder) {
+      try { mime = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm', 'audio/aac'].find(t => MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) || '';
+        mr = new MediaRecorder(stream, mime ? { mimeType: mime } : {}); mr.ondataavailable = e => { if (e.data && e.data.size) { mrChunks.push(e.data); bytes += e.data.size; } }; mr.start(250); }
+      catch (e) { logErr('mediarecorder', e); mr = null; }
+    }
+    const timer = setInterval(() => {
+      const now = performance.now() - t0;
+      if (now > maxMs) finish('max');
+      else if (!flowing && now > 1500 && now > Math.min(noSpeechMs, 6000)) finish('fixed');   // PCM not flowing (AudioContext suspended) → fixed window, MediaRecorder data is used
+      else if (flowing && !speechAt && now > noSpeechMs) finish('no-speech');
+    }, 150);
+    o.handle && o.handle({ stop: () => finish('stopped'), cancel: () => finish('cancel') });
+    async function finish(reason) {
+      if (done) return; done = true; clearInterval(timer);
+      try { if (proc) { proc.onaudioprocess = null; proc.disconnect(); } if (src) src.disconnect(); if (sink) sink.disconnect(); } catch (e) { }
+      if (mr && mr.state !== 'inactive') await new Promise(r => { mr.onstop = r; try { mr.requestData && mr.requestData(); mr.stop(); } catch (e) { r(); } setTimeout(r, 1500); });
+      stream.getTracks().forEach(t => t.stop());   // release the mic before anything is played (iOS routes to the earpiece while it is open)
+      setSession('playback');
+      const ms = Math.round(performance.now() - t0);
+      let pcm = new Float32Array(n), off = 0; for (const c of chunks) { pcm.set(c, off); off += c.length; }
+      let rate = ac ? ac.sampleRate : 48000, source = 'pcm';
+      if (reason !== 'cancel' && peak < 0.002 && bytes > 0) {   // PCM empty/silent but MediaRecorder has data → decode it
+        try { const ab = await new Blob(mrChunks, { type: mime || (mrChunks[0] && mrChunks[0].type) || '' }).arrayBuffer(); const buf = await new Promise((res, rej) => { const pr = ac.decodeAudioData(ab, res, rej); if (pr && pr.then) pr.then(res, rej); });
+          pcm = buf.getChannelData(0); rate = buf.sampleRate; source = 'mediarecorder'; peak = 0; sumSq = 0; for (let i = 0; i < pcm.length; i++) { const a = Math.abs(pcm[i]); if (a > peak) peak = a; sumSq += pcm[i] * pcm[i]; } }
+        catch (e) { logErr('decode-recording', e); }
+      }
+      const rms = pcm.length ? Math.sqrt(sumSq / pcm.length) : 0;
+      const speech = reason !== 'cancel' && (!!speechAt || ((reason === 'fixed' || reason === 'stopped' || reason === 'max') && peak > 0.03));
+      const noAudio = !speech && reason !== 'cancel' && peak < 0.002;
+      resolve({ pcm16: resample16k(pcm, rate), rate, peak, rms, reason: noAudio ? 'no-audio' : reason, endReason: reason, speech, ms, bytes, chunks: mrChunks.length, mime, pcmSamples: n, acState: ac ? ac.state : 'none', source, wav: () => pcmWav(pcm, rate) });
+    }
+  });
+}
+async function unloadVision() { if (visionMod && visionMod.unload) { try { await visionMod.unload(); } catch (e) { } } }   // memory: no vision model during a voice call
+function micErrMsg(e) {
+  const name = (e && e.name) || 'getUserMedia-error';
+  if (name === 'NotAllowedError' || name === 'SecurityError') addMsg('info', STT_ERR['not-allowed'] + errTag(name));
+  else if (name === 'NotFoundError' || name === 'NotReadableError') addMsg('info', STT_ERR['audio-capture'] + errTag(name));
+  else addMsg('info', 'دسترسی به میکروفون ممکن نشد.' + errTag(name + ': ' + ((e && e.message) || '')));
+}
+function suspendVoice() {   // app went to the background: release the mic, stop audio; a call is paused (tap to continue), not ended
+  if (call.on) { call.gen++; if (S) stopRec(true); stopSpeaking(); pauseCall('برنامه به پس‌زمینه رفت؛ برای ادامه ضربه بزنید'); }
+  else { if (S) stopRec(true); stopSpeaking(); }
 }
 
 // ---- text-to-speech
@@ -800,7 +915,7 @@ let voices = [], ttsUnlocked = false, ttsToken = 0, ttsBtn = null, ttsStopWait =
 const faVoiceMode = () => { const m = LS.get('faVoice', 'auto'); return ['auto', 'piper', 'system'].includes(m) ? m : 'auto'; };
 let piperFailed = null, ttsFa = null;
 const faEngine = () => { const m = faVoiceMode(); if (m === 'system') return 'system'; if (piperFailed && m === 'auto') return 'system'; if (m === 'piper') return 'piper'; return HAS_TTS && pickVoice(true) ? 'system' : 'piper'; };
-const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.6.0').then(m => (ttsFa = m));
+const loadTtsFa = () => ttsFa ? Promise.resolve(ttsFa) : import('./tts-fa.js?v=1.7.0').then(m => (ttsFa = m));
 const AUD = new Audio(); AUD.preload = 'auto'; AUD.setAttribute('playsinline', ''); AUD.setAttribute('webkit-playsinline', '');
 const SILENT_WAV = 'data:audio/wav;base64,UklGRkQDAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YSADAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==';
 let piperMsg = null;
@@ -829,7 +944,8 @@ function pickVoice(fa) {
   if (fa) return voices.find(v => L(v) === 'fa-ir') || voices.find(v => L(v).startsWith('fa'));
   return voices.find(v => L(v) === 'en-us' && v.localService) || voices.find(v => L(v) === 'en-us') || voices.find(v => L(v).startsWith('en'));
 }
-function unlockTTS() {   // first user tap: silent utterance + silent <audio> play so later (non-tap) speech/audio is allowed on iOS
+function unlockTTS() {   // every tap: resume the AudioContext + silent buffer; first tap also: silent utterance + silent <audio> play (iOS unlock)
+  unlockAudio();
   if (ttsUnlocked) return; ttsUnlocked = true;
   if (HAS_TTS) { try { const u = new SpeechSynthesisUtterance(' '); u.volume = 0; speechSynthesis.speak(u); } catch (e) { } }
   try { AUD.src = SILENT_WAV; const pr = AUD.play(); if (pr && pr.catch) pr.catch(() => { }); } catch (e) { }
@@ -884,17 +1000,56 @@ function playSystemChunk(p, my) {   // one speechSynthesis utterance → Promise
     speechSynthesis.speak(u);
   });
 }
-function playPcm(pcm, rate, my) {   // Piper audio through the (tap-unlocked) <audio> element → Promise on end
+let lastPlay = null;   // { via, ok, ended, err } — shown on the diagnostic screen
+async function playPcm(pcm, rate, my) {   // Piper audio. iOS: <audio> + WAV blob first (most reliable), Web Audio second, then a big tap-to-hear button
+  if (my !== ttsToken) return;
+  const vol = ttsVol(); if (vol < 0.999) { const q = new Float32Array(pcm.length); for (let i = 0; i < pcm.length; i++) q[i] = pcm[i] * vol; pcm = q; }   // iOS ignores <audio>.volume → scale the samples
+  setSession('playback');
+  const order = LS.get('audOut', 'auto') === 'webaudio' ? ['ac', 'el'] : ['el', 'ac'];
+  for (const via of order) {
+    const r = via === 'el' ? await playViaElement(pcm, rate, my) : await playViaAC(pcm, rate, my);
+    lastPlay = { via, ...r };
+    if (r.ok || my !== ttsToken) return r;
+    logErr('play-' + via, r.err);
+  }
+  if (my !== ttsToken) return;
+  return playAfterTap(pcm, rate, my);
+}
+function playViaElement(pcm, rate, my) {
   return new Promise(res => {
-    if (my !== ttsToken) return res();
-    const vol = ttsVol(); if (vol < 0.999) { const q = new Float32Array(pcm.length); for (let i = 0; i < pcm.length; i++) q[i] = pcm[i] * vol; pcm = q; }   // iOS ignores <audio>.volume → scale the samples
-    const url = URL.createObjectURL(ttsFa.wav(pcm, rate)); let done = false, wd = null;
-    const fin = () => { if (done) return; done = true; clearTimeout(wd); AUD.onended = AUD.onerror = null; if (ttsStopWait === fin) ttsStopWait = null; setTimeout(() => URL.revokeObjectURL(url), 1000); res(); };
-    ttsStopWait = fin;
-    AUD.onended = fin; AUD.onerror = fin;
-    AUD.src = url; try { AUD.playbackRate = 1; } catch (e) { }
-    wd = setTimeout(fin, (pcm.length / rate) * 1000 + 4000);   // safety net if 'ended' never fires
-    const pr = AUD.play(); if (pr && pr.catch) pr.catch(e => { if (my === ttsToken) addMsg('info', 'پخش صدا ممکن نشد؛ یک‌بار روی صفحه بزنید و دوباره امتحان کنید.' + errTag(e.name)); fin(); });
+    if (my !== ttsToken) return res({ ok: true, ended: false });
+    const url = URL.createObjectURL(pcmWav(pcm, rate)); let done = false, started = false, wd = null;
+    const fin = (ok, ended, err) => { if (done) return; done = true; clearTimeout(wd); AUD.onended = AUD.onerror = null; if (ttsStopWait === stopper) ttsStopWait = null; setTimeout(() => URL.revokeObjectURL(url), 1000); res({ ok, ended, err }); };
+    const stopper = () => fin(true, false, 'stopped'); ttsStopWait = stopper;
+    AUD.onended = () => fin(true, true); AUD.onerror = () => fin(false, false, 'media-error-' + (AUD.error ? AUD.error.code : '?'));
+    AUD.src = url; try { AUD.playbackRate = 1; AUD.volume = 1; AUD.muted = false; } catch (e) { }
+    wd = setTimeout(() => fin(started, false, started ? 'no-ended-event' : 'timeout'), (pcm.length / rate) * 1000 + 4000);
+    let pr; try { pr = AUD.play(); } catch (e) { return fin(false, false, e.name || 'play-error'); }
+    if (pr && pr.then) pr.then(() => { started = true; }, e => fin(false, false, e.name || 'play-error')); else started = true;
+  });
+}
+async function playViaAC(pcm, rate, my) {
+  const ac = getAC(); if (!ac) return { ok: false, ended: false, err: 'no-AudioContext' };
+  if (ac.state !== 'running') { try { await Promise.race([ac.resume(), sleep(500)]); } catch (e) { } }
+  if (ac.state !== 'running') return { ok: false, ended: false, err: 'audiocontext-' + ac.state };
+  if (my !== ttsToken) return { ok: true, ended: false };
+  return new Promise(res => {
+    let done = false, wd = null, srcN = null;
+    const fin = ended => { if (done) return; done = true; clearTimeout(wd); if (ttsStopWait === stopper) ttsStopWait = null; res({ ok: true, ended }); };
+    const stopper = () => { try { srcN && srcN.stop(); } catch (e) { } fin(false); }; ttsStopWait = stopper;
+    try {
+      const buf = ac.createBuffer(1, pcm.length, rate); buf.getChannelData(0).set(pcm);
+      srcN = ac.createBufferSource(); srcN.buffer = buf; srcN.connect(ac.destination); srcN.onended = () => fin(true); srcN.start();
+      wd = setTimeout(() => fin(false), (pcm.length / rate) * 1000 + 3000);
+    } catch (e) { done = true; res({ ok: false, ended: false, err: e.name || 'webaudio-error' }); }
+  });
+}
+function playAfterTap(pcm, rate, my) {   // both paths refused (no user gesture): play inside the next tap
+  return new Promise(res => {
+    const b = $('tapplay'); b.classList.remove('hidden');
+    const stopper = () => { b.classList.add('hidden'); b.onclick = null; res({ ok: false, ended: false, err: 'stopped' }); };
+    ttsStopWait = stopper;
+    b.onclick = () => { b.classList.add('hidden'); b.onclick = null; if (ttsStopWait === stopper) ttsStopWait = null; unlockAudio(); playViaElement(pcm, rate, my).then(r => { lastPlay = { via: 'el-tap', ...r }; res(r); }); };
   });
 }
 async function speak(text, opts = {}) {
@@ -1149,7 +1304,9 @@ async function ocrImage(src, status = () => { }) {   // free, keyless, on-device
   if (window.__ocrStub) return window.__ocrStub(src);
   if (!tessWorker) {
     status(T('ocrLoading'));
-    const Tess = (await import(TESS + 'tesseract.esm.min.js')).default;
+    const src = new URL('./vendor/tesseract.min.js', import.meta.url).href;   // self-hosted classic script (iOS failed CDN module imports)
+    if (!window.Tesseract) await new Promise((res, rej) => { const sc = document.createElement('script'); sc.src = src; sc.onload = () => window.Tesseract ? res() : rej(new Error('global Tesseract missing: ' + src)); sc.onerror = () => rej(Object.assign(new Error('script could not be loaded: ' + src), { name: 'ScriptLoadError' })); document.head.appendChild(sc); });
+    const Tess = window.Tesseract;
     tessWorker = await Tess.createWorker(['fas', 'eng'], 1, { workerPath: TESS + 'worker.min.js', corePath: TESS_CORE,
       logger: m => { if (m && m.status === 'recognizing text') status(T('ocrRunning') + ' ' + FA(Math.round((m.progress || 0) * 100)) + '٪'); } });
   }
@@ -1239,6 +1396,138 @@ function applyTheme() {
 if (darkMQ) { try { darkMQ.addEventListener('change', applyTheme); } catch (e) { darkMQ.addListener && darkMQ.addListener(applyTheme); } }
 applyTheme();
 
+// ------------------------------------------------------------------ 🩺 voice diagnostic (Settings → «بررسی صدا», or …/goosh/#diag)
+const diag = { res: {}, order: [] };
+const DICO = { ok: '✅', fail: '❌', warn: '⚠️', run: '⏳', ask: '❓' };
+function dRow(id, title) {
+  let el = $('dg-' + id);
+  if (!el) { el = document.createElement('div'); el.id = 'dg-' + id; el.className = 'card dstep'; el.innerHTML = `<div class="dhead"><span class="dico">⏳</span> <b class="dtitle"></b></div><div class="dres"></div><pre class="ddet" dir="ltr"></pre><div class="dact"></div>`; el.querySelector('.dtitle').textContent = title; $('diag-steps').appendChild(el); diag.order.push(id); }
+  return el;
+}
+function dSet(id, title, st, res, det) {
+  const el = dRow(id, title); el.className = 'card dstep ' + st; el.querySelector('.dico').textContent = DICO[st];
+  if (res != null) el.querySelector('.dres').textContent = res;
+  if (det != null) el.querySelector('.ddet').textContent = det;
+  diag.res[id] = { title, st, res: res != null ? res : (diag.res[id] || {}).res, det: det != null ? det : (diag.res[id] || {}).det };
+  return el;
+}
+function dButtons(id, list) { const box = dRow(id).querySelector('.dact'); box.innerHTML = ''; list.forEach(([label, fn, cls]) => { const b = document.createElement('button'); b.className = cls || 'btn2'; b.textContent = label; b.onclick = fn; box.appendChild(b); }); return box; }
+function renderErrLog() {
+  let l = []; try { l = JSON.parse(localStorage.getItem('goosh.errlog') || '[]'); } catch (e) { }
+  $('dg-errlog').textContent = l.length ? l.slice().reverse().map(x => x.t.slice(5, 19).replace('T', ' ') + ' [' + x.w + '] ' + x.m).join('\n') : '(خطایی ثبت نشده)';
+}
+function renderDiag() {
+  renderErrLog();
+  if (!diag.order.length) $('diag-steps').innerHTML = '<div class="card muted">روی «▶ شروع بررسی» بزنید. بعد از زدن، حدود ۴ ثانیه به فارسی بگویید: «سلام، امروز هوا چطوره؟» — مراحل یکی‌یکی اجرا می‌شود و نتیجهٔ هر مرحله با ✅ یا ❌ و متن دقیق خطا نشان داده می‌شود.</div>';
+}
+function diagReport() {
+  const lines = ['گوش مصنوعی — گزارش بررسی صدا', 'نسخه ' + APP_VERSION + ' · ' + new Date().toISOString(), ''];
+  diag.order.forEach(id => { const r = diag.res[id]; if (!r) return; lines.push(DICO[r.st] + ' ' + r.title + ': ' + (r.res || '')); if (r.det) lines.push('   ' + String(r.det).replace(/\n/g, '\n   ')); });
+  lines.push('', 'گزارش خطاها:', $('dg-errlog').textContent);
+  return lines.join('\n');
+}
+function startDiag() {   // tap handler: AudioContext resume + silent buffer AND getUserMedia, synchronously in this same tap
+  unlockTTS();
+  const micP = getMic().then(st => ({ st }), e => ({ e }));
+  diag.res = {}; diag.order = []; $('diag-steps').innerHTML = ''; $('dg-start').disabled = true;
+  runDiag(micP).catch(e => { logErr('diag', e); dSet('crash', 'خطای بررسی', 'fail', e.message, e.stack || ''); }).finally(() => { $('dg-start').disabled = false; renderErrLog(); });
+}
+async function runDiag(micP) {
+  const ua = navigator.userAgent, iosV = (ua.match(/OS (\d+)[_.](\d+)(?:[_.](\d+))?/) || []).slice(1).filter(Boolean).join('.');
+  dSet('env', 'دستگاه و مرورگر', 'ok', (IOS ? 'iOS ' + (iosV || '?') : navigator.platform || '?') + (STANDALONE ? ' · برنامهٔ صفحهٔ اصلی (PWA)' : ' · داخل مرورگر'), `app ${APP_VERSION}\nUA: ${ua}\nsecureContext=${isSecureContext} online=${navigator.onLine}`);
+  const SRT = 'تشخیص گفتار مرورگر (SpeechRecognition)';
+  dSet('sr', SRT, SRClass ? (srBlocked() ? 'warn' : 'ok') : 'fail', SRClass ? 'وجود دارد' + (srBlocked() ? ' — ولی در این اجرا رد شد: ' + (sess.get('srBlockedCode') || '?') : ' — با دکمهٔ آزمایش پایین امتحان کنید') : (STANDALONE ? 'در حالت برنامهٔ صفحهٔ اصلی وجود ندارد — برنامه را در Safari باز کنید' : 'در این مرورگر وجود ندارد — از دیکتهٔ کیبورد استفاده کنید'),
+    `SpeechRecognition=${!!window.SpeechRecognition} webkitSpeechRecognition=${!!window.webkitSpeechRecognition}\nstandalone=${STANDALONE} lang=${srLang()} (fa-IR → fa fallback)\nsafari-url=${SAFARI_URL}`);
+  if (!SRClass && STANDALONE) { const b = dButtons('sr', []); safariButtons(b); }
+  const mimes = window.MediaRecorder && MediaRecorder.isTypeSupported ? ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/wav'].filter(t => MediaRecorder.isTypeSupported(t)) : [];
+  dSet('mr', 'MediaRecorder', window.MediaRecorder ? (mimes.length ? 'ok' : 'warn') : 'warn', window.MediaRecorder ? 'قالب‌ها: ' + (mimes.join(' ، ') || 'هیچ') : 'وجود ندارد (ضبط PCM کافی است)', '');
+  const ac = getAC();
+  dSet('as', 'نشست صوتی و AudioContext', ac && ac.state === 'running' ? 'ok' : 'warn', 'audioSession: ' + sessionType() + ' · AudioContext: ' + (ac ? ac.state : 'ناموجود'), ac ? `sampleRate=${ac.sampleRate} baseLatency=${ac.baseLatency || '-'}` : '');
+  // --- microphone
+  let perm = 'نامشخص'; try { perm = (await navigator.permissions.query({ name: 'microphone' })).state; } catch (e) { }
+  const MT = 'میکروفون: اجازه + ضبط ۴ ثانیه';
+  dSet('mic', MT, 'run', 'اجازه: ' + perm + ' — الان به فارسی بگویید: «سلام، امروز هوا چطوره؟»', '');
+  const m = await micP; let rec = null;
+  if (m.e) dSet('mic', MT, 'fail', 'میکروفون باز نشد: ' + m.e.name + (m.e.name === 'NotAllowedError' ? ' — اجازهٔ میکروفون را در Settings ← Safari (یا خود برنامه) بدهید' : ''), `${m.e.name}: ${m.e.message}\npermission=${perm}`);
+  else {
+    const tr = m.st.getAudioTracks()[0]; let ts = ''; try { ts = JSON.stringify(tr.getSettings()); } catch (e) { }
+    const box = dButtons('mic', []); box.innerHTML = '<div class="meter"><i></i></div>'; const bar = box.querySelector('i');
+    rec = await recordUtterance(m.st, { maxMs: 4000, noSpeechMs: 1e9, silenceMs: 1e9, onLevel: (rms, pk) => { bar.style.width = Math.min(100, Math.round(pk * 150)) + '%'; } });
+    const good = rec.peak > 0.02 && (rec.pcmSamples > 0 || rec.bytes > 0);
+    dSet('mic', MT, good ? 'ok' : 'fail', good ? `صدا ضبط شد ✓ — بلندترین سطح ${FA(Math.round(rec.peak * 100))}٪ · ${FA(Math.round(rec.bytes / 1024))} کیلوبایت` : (rec.peak < 0.002 ? 'هیچ صدایی از میکروفون نرسید (سکوت کامل)' : 'صدا خیلی ضعیف بود'),
+      `permission=${perm}\ntrack: ${tr ? tr.label + ' readyState=' + tr.readyState + ' muted=' + tr.muted + ' enabled=' + tr.enabled : '-'}\nsettings: ${ts}\nPCM: samples=${rec.pcmSamples} rate=${rec.rate} peak=${rec.peak.toFixed(4)} rms=${rec.rms.toFixed(4)}\nMediaRecorder: ${rec.mime || '-'} bytes=${rec.bytes} chunks=${rec.chunks}\nused=${rec.source} AudioContext=${rec.acState} audioSession=${sessionType()}`);
+    const r2 = rec; dButtons('mic', [['▶ پخش صدای ضبط‌شده', () => { unlockAudio(); AUD.src = URL.createObjectURL(r2.wav()); AUD.play().catch(e => logErr('diag-playback', e)); }]]);
+  }
+  // --- speech recognition test (needs its own tap on iOS)
+  diagSrButton();
+  // --- LLM
+  const LT = 'پاسخ فارسی از مغز آنلاین رایگان';
+  dSet('llm', LT, 'run', 'در حال پرسیدن…', '');
+  try { const t0 = Date.now(); const r = await agent([{ role: 'user', content: 'سلام! در یک جملهٔ کوتاه فارسی خودت را معرفی کن.' }]); dSet('llm', LT, persianOk(r.reply) ? 'ok' : 'warn', '«' + String(r.reply).slice(0, 220) + '»', `brain=${r.brain} time=${Date.now() - t0}ms`); }
+  catch (e) { logErr('diag-llm', e); dSet('llm', LT, 'fail', 'پاسخی نیامد: ' + e.message, `${e.name}: ${e.message} online=${navigator.onLine}`); }
+  // --- Persian voice (Piper)
+  await diagTts();
+  // --- memory
+  let est = ''; try { const q = await navigator.storage.estimate(); est = `storage used=${Math.round(q.usage / 1e6)}MB quota=${Math.round(q.quota / 1e6)}MB`; } catch (e) { }
+  const loaded = ['Piper' + (ttsFa ? ' ✓' : ' –'), 'Vision' + (visionMod ? ' (ماژول بار شده)' : ' –')].join(' · ');
+  dSet('mem', 'حافظه و مدل‌ها', 'ok', 'مدل‌های در حافظه: ' + loaded, `${est}\ndeviceMemory=${navigator.deviceMemory || '?'} jsHeap=${performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1e6) + 'MB' : '?'}\nنکته: در آیفون مدل بینایی هنگام تماس صوتی بار نمی‌شود. تشخیص گفتار مدل دانلودی ندارد (سرویس خود iOS).`);
+  dSet('as2', 'نشست صوتی بعد از آزمایش', 'ok', 'audioSession: ' + sessionType() + ' · AudioContext: ' + (getAC() ? getAC().state : '-'), '');
+}
+const STT_T = 'آزمایش تشخیص گفتار فارسی';
+function diagSrButton() {
+  if (!SRClass) { dSet('stt', STT_T, 'fail', 'SpeechRecognition وجود ندارد' + (STANDALONE ? ' (حالت برنامهٔ صفحهٔ اصلی) — در Safari باز کنید یا از دیکتهٔ کیبورد استفاده کنید.' : ' — از دیکتهٔ کیبورد استفاده کنید.'), 'SpeechRecognition-unavailable'); return; }
+  dSet('stt', STT_T, 'ask', 'روی دکمه بزنید و بلافاصله به فارسی بگویید: «سلام، امروز هوا چطوره؟»', 'lang=' + srLang());
+  dButtons('stt', [['🎙 آزمایش تشخیص گفتار', () => diagSr([], true), 'btn']]);
+}
+function diagSr(tried, gesture) {   // runs synchronously inside the tap (recognition.start)
+  if (S) stopRec(true);
+  unlockAudio(); const lang = srLang(); tried = tried.concat(lang);
+  dSet('stt', STT_T, 'run', '🎙 در حال گوش دادن (' + lang + ')… الان صحبت کنید', ''); dButtons('stt', [['⏹ پایان', () => stopRec(false)]]);
+  const ok = startRec(s => {
+    const lf = srLangFallback(s), det = `lang tried: ${tried.join(' → ')}\nerror=${s.error || '-'}${s.startErr ? ' start=' + s.startErr : ''} started=${s.started} ms=${Date.now() - s.t0}\nstandalone=${STANDALONE}`;
+    if (lf === 'retry') { dSet('stt', STT_T, 'run', '«fa-IR» پذیرفته نشد؛ امتحان با «fa»…', det); return setTimeout(() => diagSr(tried, false), 50); }
+    if (s.text) { dSet('stt', STT_T, 'ok', 'متن تشخیص داده شده: «' + s.text + '»', det); dButtons('stt', [['🔁 دوباره', () => diagSr([], true)]]); return; }
+    const e = s.error;
+    const msg = lf === 'none' ? 'فارسی پشتیبانی نمی‌شود: هم fa-IR و هم fa رد شد (language-not-supported)'
+      : e === 'not-allowed' ? 'اجازهٔ میکروفون/تشخیص گفتار داده نشد (not-allowed)'
+      : e === 'service-not-allowed' ? 'iOS سرویس تشخیص گفتار را به برنامه نداد (service-not-allowed)' + (STANDALONE ? ' — در Safari باز کنید' : '')
+      : e === 'start-failed' ? (gesture ? 'شروع تشخیص گفتار رد شد: ' + (s.startErr || '?') : 'برای ادامه دوباره روی دکمه بزنید')
+      : e === 'no-speech' || (!e && s.started) ? 'صدایی شنیده نشد / متنی برنگشت' : e ? 'خطا: ' + e : 'تشخیص گفتار بدون شروع تمام شد (ended-without-start)';
+    dSet('stt', STT_T, e === 'no-speech' || (e === 'start-failed' && !gesture) ? 'warn' : 'fail', msg, det);
+    const b = dButtons('stt', [['🔁 دوباره امتحان کن', () => diagSr([], true), 'btn']]); if (STANDALONE && (e === 'service-not-allowed' || lf === 'none')) safariButtons(b);
+  }, gesture, false, { quiet: true, lang, onText: t => dSet('stt', STT_T, 'run', '🎙 ' + lang + ': «' + t + '»', '') });
+  if (!ok && !S) { /* onDone already reported */ }
+}
+async function diagTts() {
+  const TT = 'صدای فارسی داخل برنامه (Piper): پخش';
+  dSet('tts', TT, 'run', 'آماده‌سازی صدای فارسی (بار اول حدود ۸۴ مگابایت)…', '');
+  try {
+    let mod; try { mod = await loadTtsFa(); } catch (e) { throw Object.assign(new Error('import ./tts-fa.js: ' + e.message), { name: e.name, stage: 'import', url: new URL('tts-fa.js', location.href).href }); }
+    const t0 = Date.now(); await mod.load(f => dSet('tts', TT, 'run', 'دانلود صدای فارسی… ' + FA(Math.round(f * 100)) + '٪ (' + mod.stage + ')'));
+    diag.ttsLoad = `stage=${mod.stage} load=${Date.now() - t0}ms\nort: ${mod.URLS.ORT_JS} ✓ (global ort ${window.ort && window.ort.env ? 'ok' : '?'})\npiper: ${mod.URLS.PIPER_JS} ✓\nvoice: ${mod.URLS.VOICE}`;
+    dSet('tts', TT, 'run', 'موتور صدا بار شد ✓ — در حال ساختن صدا…', diag.ttsLoad);
+    diag.pcm = await mod.synth('سلام! این آزمایش صدای گوش مصنوعی است. اگر این را می‌شنوید، روی «شنیدم» بزنید.', { rate: ttsRate() }); diag.rate = (await mod.load()).sampleRate;
+    await diagPlay(LS.get('audOut', 'auto') === 'webaudio' ? 'ac' : 'el');
+  } catch (e) {
+    logErr('diag-piper', e);
+    dSet('tts', TT, 'fail', 'صدای فارسی آماده نشد' + (e.stage ? ' (مرحله: ' + e.stage + ')' : '') + ': ' + (e.message || e), `${e.name}: ${e.message}\nstage=${e.stage || '-'} url=${e.url || '-'}\nسیستم: صدای سیستم (speechSynthesis) به‌عنوان جایگزین ${HAS_TTS ? 'موجود است' : 'وجود ندارد'}`);
+    if (HAS_TTS) dButtons('tts', [['🔊 آزمایش صدای سیستم', () => { unlockTTS(); const u = new SpeechSynthesisUtterance('سلام، این صدای سیستم است.'); const v = pickVoice(true); if (v) u.voice = v; u.lang = 'fa-IR'; speechSynthesis.speak(u); }]]);
+  }
+}
+async function diagPlay(via) {
+  const TT = 'صدای فارسی داخل برنامه (Piper): پخش';
+  stopSpeaking(); const my = ttsToken; setSession('playback');
+  dSet('tts', TT, 'run', 'در حال پخش… (' + (via === 'el' ? '<audio>' : 'Web Audio') + ')');
+  const r = via === 'el' ? await playViaElement(diag.pcm, diag.rate, my) : await playViaAC(diag.pcm, diag.rate, my);
+  dSet('tts', TT, 'ask', (r.ended ? 'پخش تا آخر انجام شد (رویداد ended رسید). ' : 'پخش انجام نشد: ' + (r.err || '?') + '. ') + 'آیا صدا را شنیدید؟',
+    `${diag.ttsLoad ? diag.ttsLoad + '\n' : ''}via=${via === 'el' ? '<audio> + WAV blob' : 'Web Audio (AudioContext)'} ok=${r.ok} ended=${r.ended} err=${r.err || '-'}\naudioSession=${sessionType()} AudioContext=${getAC() ? getAC().state : '-'} duration=${(diag.pcm.length / diag.rate).toFixed(1)}s`);
+  dButtons('tts', [
+    ['✅ شنیدم', () => { LS.set('audOut', via === 'el' ? 'auto' : 'webaudio'); dSet('tts', TT, 'ok', 'صدا شنیده شد با ' + (via === 'el' ? '<audio>' : 'Web Audio') + ' — همین روش ذخیره شد.'); dButtons('tts', []); }, 'btn'],
+    ['❌ نشنیدم', () => { unlockAudio(); if (via === 'el') diagPlay('ac'); else { dSet('tts', TT, 'fail', 'با هیچ روشی شنیده نشد. کلید بی‌صدای کنار آیفون را خاموش کنید، صدای رسانه را با دکمهٔ صدا بالا ببرید، بلوتوث را بررسی کنید و دوباره امتحان کنید.'); dButtons('tts', [['🔁 دوباره', () => { unlockAudio(); diagPlay('el'); }]]); } }, 'del'],
+    ['🔁 دوباره پخش کن', () => { unlockAudio(); diagPlay(via); }],
+  ]);
+}
+
 // ------------------------------------------------------------------ files (txt/md/pdf → text, stored on phone)
 // Rebuild reading order from positioned glyphs (Persian PDFs often store visual-order presentation forms)
 function pdfPageText(items) {
@@ -1281,8 +1570,8 @@ async function addFile(f) {
 function go(v) {
   document.querySelectorAll('.view').forEach(s => s.classList.toggle('on', s.id === 'v-' + v));
   document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.v === v));
-  D.settings.view = v; save('settings');
-  ({ home: renderHome, agents: renderAgents, tasks: renderTasks, notes: renderNotes, memory: renderMemory, settings: fillSettings, chat: () => $('log').scrollTop = 1e9 })[v]?.();
+  if (v !== 'diag') { D.settings.view = v; save('settings'); }
+  ({ diag: renderDiag, home: renderHome, agents: renderAgents, tasks: renderTasks, notes: renderNotes, memory: renderMemory, settings: fillSettings, chat: () => $('log').scrollTop = 1e9 })[v]?.();
 }
 window.go = go;
 function refreshBadges() {
@@ -1401,7 +1690,7 @@ function renderMemory() {
 // settings + features
 function fillSettings() {
   $('st-prov').value = setting('prov', ''); $('st-key').value = setting('key', ''); $('st-model').value = setting('model', '');
-  $('st-tts').checked = ttsOn(); $('st-autosend').checked = autoSend(); $('st-favoice').value = faVoiceMode(); faVoiceStatus(); $('st-whisper').checked = setting('whisper', false);
+  $('st-tts').checked = ttsOn(); $('st-autosend').checked = autoSend(); $('st-favoice').value = faVoiceMode(); faVoiceStatus(); $('st-audout').value = LS.get('audOut', 'auto') === 'webaudio' ? 'webaudio' : 'auto';
   $('st-pcon').checked = setting('pcOn', false); $('st-pc').value = setting('pcBase', ''); $('st-pin').value = setting('pin', '');
   loadVoices && HAS_TTS && loadVoices();
   $('voiceinfo').textContent = 'تشخیص گفتار داخل برنامه: ' + (SRClass && !srBlocked() ? 'موجود (پشتیبانی واقعی به نسخهٔ iOS بستگی دارد)' : 'ناموجود — از میکروفون کیبورد آیفون استفاده کنید') +
@@ -1432,7 +1721,7 @@ async function renderFeatures() {
     ['یادداشت‌ها، فایل‌ها، حافظه، کارها (روی گوشی)', 'ok'],
     ['یادآوری‌ها (هنگام باز کردن برنامه)', 'part'],
     ['اعلان وقتی برنامه بسته است', 'no'],
-    ['تشخیص گفتار', (SR && !srBlocked()) || setting('whisper', false) ? 'part' : 'no'],
+    ['تشخیص گفتار (سیری/مرورگر' + (STANDALONE && !SR ? ' — در Safari باز کنید' : '') + ')', (SR && !srBlocked()) ? 'part' : 'no'],
     ['خواندن پاسخ با صدای فارسی', (HAS_TTS && pickVoice(true)) || pc ? 'ok' : HAS_TTS ? 'part' : 'no'],
     ['باز شدن بدون اینترنت', 'serviceWorker' in navigator && sec ? 'ok' : 'no'],
     ['کامپیوتر خانه (اختیاری)', pc ? 'ok' : 'no'],
@@ -1512,11 +1801,17 @@ $('st-favoice-del').onclick = async () => { if (!confirm('مدل صدای فار
 async function forceUpdate() {   // unregister service workers + delete caches (data in IndexedDB is kept), then reload fresh
   $('upd-btn').disabled = true; $('upd-btn').textContent = '⏳ در حال به‌روزرسانی…';
   try { const regs = (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) ? await navigator.serviceWorker.getRegistrations() : []; await Promise.all(regs.map(r => r.unregister())); } catch (e) { }
-  try { const ks = await caches.keys(); await Promise.all(ks.filter(k => /^goosh-v\d+$/.test(k)).map(k => caches.delete(k))); } catch (e) { }   // only app caches; keep the Persian voice + vision/Whisper models
+  try { const ks = await caches.keys(); await Promise.all(ks.filter(k => /^goosh-v\d+$/.test(k)).map(k => caches.delete(k))); } catch (e) { }   // only app caches; keep the Persian voice + vision models
   location.replace(location.pathname.replace(/[^/]*$/, '') + '?v=' + Date.now());
 }
 $('upd-btn').onclick = forceUpdate;
-$('st-whisper').onchange = e => { D.settings.whisper = e.target.checked; save('settings'); };
+$('st-audout').onchange = e => { LS.set('audOut', e.target.value); };
+$('st-diag').onclick = () => { location.hash = '#diag'; go('diag'); };
+$('dg-start').onclick = startDiag;
+$('dg-copy').onclick = () => copyText(diagReport(), $('dg-copy'));
+$('dg-clear').onclick = () => { localStorage.removeItem('goosh.errlog'); renderErrLog(); };
+$('dg-back').onclick = () => { history.replaceState(null, '', location.pathname + location.search); go('settings'); };
+window.addEventListener('hashchange', () => { if (location.hash === '#diag') go('diag'); });
 $('st-pcon').onchange = e => { D.settings.pcOn = e.target.checked; save('settings'); renderFeatures(); };
 $('st-pcsave').onclick = async () => { D.settings.pcBase = $('st-pc').value.trim().replace(/\/$/, ''); D.settings.pin = $('st-pin').value.trim(); D.settings.pcOn = true; $('st-pcon').checked = true; save('settings'); $('st-pcmsg').textContent = (await pcAvailable()) ? '✅ وصل شد' : '❌ در دسترس نیست'; };
 $('bk-exp').onclick = async () => { const data = { app: 'gooshe-masnooi', version: 2, exported: nowISO() }; KEYS.forEach(k => data[k] = D[k]); persistConv(); data.convs = D.convs; data.curConv = curConv; data.convData = {}; for (const c of D.convs) data.convData[c.id] = c.id === curConv ? D.history : (await DB.get('conv:' + c.id).catch(() => null)) || []; download('goosh-backup-' + new Date().toISOString().slice(0, 10) + '.json', JSON.stringify(data, null, 1), 'application/json'); };
@@ -1537,9 +1832,9 @@ $('importinput').onchange = async e => {
   catch (err) { alert('خطا: ' + err.message); }
 };
 window.addEventListener('online', () => { refreshBadges(); updateOffline(); flushOutbox(); }); window.addEventListener('offline', () => { refreshBadges(); updateOffline(); });
-function stopAllVoice() { stopCall(); if (S) stopRec(true); if (wRec) wRec.stop(); stopSpeaking(); }
+function stopAllVoice() { stopCall(); if (S) stopRec(true); stopSpeaking(); }
 window.addEventListener('pagehide', stopAllVoice);
-document.addEventListener('visibilitychange', () => { if (document.hidden) stopAllVoice(); if (!document.hidden) { refreshBadges(); notifyDue(); catchUpAgents(); } });
+document.addEventListener('visibilitychange', () => { if (document.hidden) suspendVoice(); if (!document.hidden) { refreshBadges(); notifyDue(); catchUpAgents(); } });
 
 (async function init() {
   for (const k of KEYS) { const v = await DB.get(k).catch(() => undefined); if (v !== undefined) D[k] = v; }
@@ -1548,7 +1843,7 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   if (D.history.length) persistConv();
   applyLang(); updateOffline();
   if (navigator.storage?.persist) navigator.storage.persist().then(p => { $('bk-info') && ($('bk-info').textContent = p ? 'ذخیره‌سازی ماندگار فعال است.' : 'مرورگر ذخیره‌سازی ماندگار را تأیید نکرد؛ پشتیبان بگیرید.'); });
-  renderChat(); refreshBadges(); go(new URLSearchParams(location.search).get('view') || D.settings.view || 'home');
+  renderChat(); refreshBadges(); go(location.hash === '#diag' ? 'diag' : new URLSearchParams(location.search).get('view') || D.settings.view || 'home');
   notifyDue(); catchUpAgents(); flushOutbox();
   if ('serviceWorker' in navigator) {
     const hadController = !!navigator.serviceWorker.controller; let reloaded = false;
@@ -1558,4 +1853,5 @@ document.addEventListener('visibilitychange', () => { if (document.hidden) stopA
   }
   window.__ready = true;
 })();
-window.__app = { speak, voiceCommand, parseFaReminder, searchConvs, openConv, newConv, renameConv, deleteConv, chatAsText, exportChatTxt, printChat, rotateMedia, cropMedia, ocrImage, flushOutbox, ttsRate, ttsVol, applyTheme, applyLang, T, regenerate, editLast, cancelEdit, get curConv() { return curConv; }, get pendingMedia() { return pendingMedia; }, imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };
+caches.open('transformers-cache').then(c => c.keys().then(ks => ks.forEach(k => { if (/whisper/i.test(k.url)) c.delete(k); }))).catch(() => { });
+window.__app = { recordUtterance, srLang, sendMedia, getAC, playPcm, diagReport, get lastPlay() { return lastPlay; }, speak, voiceCommand, parseFaReminder, searchConvs, openConv, newConv, renameConv, deleteConv, chatAsText, exportChatTxt, printChat, rotateMedia, cropMedia, ocrImage, flushOutbox, ttsRate, ttsVol, applyTheme, applyLang, T, regenerate, editLast, cancelEdit, get curConv() { return curConv; }, get pendingMedia() { return pendingMedia; }, imageFromFile, videoFromFile, sendMedia, mediaContent, visionCapable, persianOk, faEngine, loadTtsFa, APP_VERSION, D, send, agent, runTool, addFile, runAgent, go, speak, stopSpeaking, speechText, chunkText, isFaText, call, startCall, stopCall, schema, perm, PERMS };

@@ -33,3 +33,7 @@ export async function caption(dataUrl, detailed = true) {   // → English descr
 export async function isDownloaded() {
   try { const c = await caches.open('transformers-cache'); return (await c.keys()).some(k => k.url.includes('Florence-2-base-ft') && k.url.includes('vision_encoder')); } catch (e) { return false; }
 }
+export async function unload() {   // free memory (iPhone): not kept loaded during a voice call
+  const m = M; M = P = null; loading = null;
+  if (m && m.dispose) { try { await m.dispose(); } catch (e) { } }
+}
