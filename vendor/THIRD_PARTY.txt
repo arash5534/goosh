@@ -25,3 +25,14 @@ pdf.min.mjs, pdf.worker.min.mjs
   pdf.js — Apache-2.0 — https://github.com/mozilla/pdf.js
 
 Persian voice weights (downloaded at runtime, not stored here): rhasspy/piper-voices fa_IR-amir-medium (Hugging Face).
+
+--- added in 1.9.0 ---
+spk-campplus.onnx      3D-Speaker CAM++ speaker-embedding model (zh-en common, 200k speakers) — Apache-2.0 — modelscope/3D-Speaker (ONNX export via sherpa-onnx)
+u2netp.onnx            U²-Net-p salient-object segmentation (background removal) — Apache-2.0 — github.com/xuebinqin/U-2-Net (ONNX as distributed by rembg)
+fonts/Cairo.ttf        Cairo variable font — SIL Open Font License 1.1 — Google Fonts / github.com/Gue3bara/Cairo
+seflash/logo.png       Seflash shop logo (owner's own asset, scaled copy of sami-ads/assets/logo_original.png)
+tjs/transformers.min.js, tjs/ort-wasm-simd-threaded.jsep.{mjs,wasm}
+                       @huggingface/transformers 3.7.5 (Apache-2.0) + bundled onnxruntime-web 1.22.0-dev (MIT) — npm
+tess/worker.min.js     tesseract.js 6.0.1 worker — Apache-2.0 — npm tesseract.js
+tess/tesseract-core-*-lstm.wasm.js  tesseract.js-core 6.0.0 — Apache-2.0 — npm tesseract.js-core
+tess/{fas,eng}.traineddata.gz       tessdata 4.0.0_best_int — Apache-2.0 — npm @tesseract.js-data/fas, @tesseract.js-data/eng

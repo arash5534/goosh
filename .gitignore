@@ -1,0 +1,4 @@
+__*/
+*.secret
+owner_password.txt
+salt.hex
