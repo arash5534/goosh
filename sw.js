@@ -3,8 +3,8 @@
 //   other static files are cache-first (refreshed in the background). Offline: everything falls back to the cache.
 // - On activate it deletes every older cache and, when it is replacing an older build, reloads open windows
 //   (so a page still running an old build switches to the new one without the user doing anything).
-const VERSION = 'goosh-v17';
-const FILES = ['./', 'index.html', 'app.enc?v=1.9.1', 'vendor/fonts/Cairo.ttf', 'vendor/seflash/logo.png', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'vendor/ort.wasm.min.js', 'vendor/piper-phonemize.js', 'vendor/tesseract.min.js',
+const VERSION = 'goosh-v18';
+const FILES = ['./', 'index.html', 'app.enc?v=1.10.0', 'vendor/fonts/Cairo.ttf', 'vendor/seflash/logo.png', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'vendor/ort.wasm.min.js', 'vendor/piper-phonemize.js', 'vendor/tesseract.min.js',
   'icons/icon.svg', 'icons/goosh-180.png', 'icons/goosh-192.png', 'icons/goosh-512.png', 'icons/goosh-maskable-512.png',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting())));
@@ -19,14 +19,23 @@ self.addEventListener('activate', e => e.waitUntil((async () => {
   }
 })()));
 self.addEventListener('message', e => { if (e.data === 'skipWaiting') self.skipWaiting(); });
-const NETWORK_FIRST = /(\/|index\.html|app\.enc|app\.js|tts-fa\.js|stt-fa\.js|spk-fa\.js|video-maker\.js|vision\.js|style\.css|manifest\.webmanifest)$/;   // matched on pathname (query ignored)
+const NETWORK_FIRST = /(\/|index\.html|app\.enc|app\.js|tts-fa\.js|stt-fa\.js|spk-fa\.js|video-maker\.js|vision\.js|llm-fa\.js|apps-fa\.js|style\.css|manifest\.webmanifest)$/;   // matched on pathname (query ignored)
+// 1.10.0: cross-origin isolation (COOP/COEP) added by this worker — GitHub Pages cannot send these headers. It enables SharedArrayBuffer,
+// so the offline brain (llm-fa.js) can use several CPU threads (≈3–4× faster). Every cross-origin resource the app uses is CORS (fetch / crossOrigin images).
+function coi(r) {
+  if (!r || r.status === 0 || r.type === 'opaque' || r.type === 'opaqueredirect') return r;
+  const h = new Headers(r.headers); h.set('Cross-Origin-Opener-Policy', 'same-origin'); h.set('Cross-Origin-Embedder-Policy', 'require-corp'); h.set('Cross-Origin-Resource-Policy', 'same-origin');
+  return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
+}
 self.addEventListener('fetch', e => {
   const u = new URL(e.request.url);
   if (e.request.method !== 'GET' || u.origin !== location.origin) return;   // APIs go straight to the network
-  if (/\/vendor\/([^/]+\.(wasm|data)|vosk[^/]*|spk[^/]*\.onnx|u2netp\.onnx)$/.test(u.pathname)) return;   // big model files: tts-fa.js / stt-fa.js / spk-fa.js / video-maker.js keep them in their own caches
+  if (/\/vendor\/([^/]+\.(wasm|data)|vosk[^/]*|spk[^/]*\.onnx|u2netp\.onnx)$/.test(u.pathname)) return;
+  if (/\/vendor\/(wllama|llm)\//.test(u.pathname)) return;   // 1.10.0: offline-brain runtime + model chunks live in their own cache ('goosh-llm-v1', llm-fa.js), never in the app cache   // big model files: tts-fa.js / stt-fa.js / spk-fa.js / video-maker.js keep them in their own caches
   const put = r => { if (r.ok && (!u.search || e.request.mode !== 'navigate')) { const copy = r.clone(); caches.open(VERSION).then(c => c.put(e.request, copy)); } return r; };
   if (e.request.mode === 'navigate' || NETWORK_FIRST.test(u.pathname)) {
-    e.respondWith(fetch(e.request, { cache: 'no-store' }).then(put).catch(() => caches.match(e.request, { ignoreSearch: true }).then(hit => hit || caches.match('index.html'))));
+    const nav = e.request.mode === 'navigate';
+    e.respondWith(fetch(e.request, { cache: 'no-store' }).then(put).catch(() => caches.match(e.request, { ignoreSearch: true }).then(hit => hit || caches.match('index.html'))).then(r => nav ? coi(r) : r));
     return;
   }
   e.respondWith(caches.match(e.request, { ignoreSearch: true }).then(hit => {

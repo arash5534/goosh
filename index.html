@@ -39,14 +39,14 @@ html,body{margin:0;background:#0b0b0c;color:#f2f2f2;font-family:-apple-system,"S
   <label><input type="checkbox" id="gl-rem" checked> روی این دستگاه به خاطر بسپار</label>
   <button id="gl-btn" type="submit">باز کردن</button>
   <div class="err" id="gl-err"></div>
-  <div class="ver">v1.9.1 (goosh-v17)</div>
+  <div class="ver">v1.10.0 (goosh-v18)</div>
 </form></div>
 <script>
 // Owner lock: the app's code (HTML, CSS, JS) is published only as AES-256-GCM ciphertext (app.enc).
 // The key is derived on the device from the owner's password with PBKDF2-SHA256; nothing secret is stored on the server.
 // "Remember" keeps the derived key as a NON-extractable CryptoKey in this browser's IndexedDB (the password itself is never stored).
 (function () {
-  var ENC = 'app.enc?v=1.9.1', $ = function (id) { return document.getElementById(id); };
+  var ENC = 'app.enc?v=1.10.0', $ = function (id) { return document.getElementById(id); };
   function idb(mode, fn) { return new Promise(function (res, rej) { var r = indexedDB.open('goosh-lock', 1); r.onupgradeneeded = function () { r.result.createObjectStore('k'); };
     r.onsuccess = function () { var t = r.result.transaction('k', mode), q = fn(t.objectStore('k')); t.oncomplete = function () { res(q && q.result); }; t.onerror = function () { rej(t.error); }; }; r.onerror = function () { rej(r.error); }; }); }
   var encP = null;
