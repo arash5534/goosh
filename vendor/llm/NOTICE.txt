@@ -1,0 +1,9 @@
+Goosh offline brain model files (gemma3-1b-fa.gguf.part00..06)
+
+Model: Gemma 3 1B IT (QAT), re-quantized to GGUF (Q4_0 weights, Q5_0 token embeddings) with llama.cpp b11371,
+from the QAT bf16 checkpoint; split into raw byte chunks (concatenate part00..part06 in order to get the .gguf).
+
+Gemma is provided under and subject to the Gemma Terms of Use found at https://ai.google.dev/gemma/terms
+Use of these files must also comply with the Gemma Prohibited Use Policy: https://ai.google.dev/gemma/prohibited_use_policy
+
+Modification notice: these files were modified (quantized and split) from the original Gemma model.

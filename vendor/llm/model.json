@@ -1,0 +1,62 @@
+{
+ "id": "gemma3-1b-fa-q4_0-e5",
+ "name": "Gemma 3 1B IT (QAT Q4_0, embeddings Q5_0)",
+ "base": "google/gemma-3-1b-it (QAT)",
+ "quant": "Q4_0 weights + Q5_0 token embeddings (llama.cpp b11371)",
+ "size": 607179296,
+ "sha256": "baa6143a3ba747708e5825ea6e7876a0939ba271580659fe30d0cb54fd1dc4ac",
+ "parts": [
+  {
+   "file": "gemma3-1b-fa.gguf.part00",
+   "size": 95000000,
+   "sha256": "4faec096a2f788e8af6ea9758d76390994c65d895b6bc3069fc4c2c9a8d5b467"
+  },
+  {
+   "file": "gemma3-1b-fa.gguf.part01",
+   "size": 95000000,
+   "sha256": "13f086edbb05c1858e017ac32b89c121f43d707f8cf025f0a6f6e83b44a70bbf"
+  },
+  {
+   "file": "gemma3-1b-fa.gguf.part02",
+   "size": 95000000,
+   "sha256": "bd64ee1323ca991506dda81eb7f86d82e0997475724e53ed3866ee84aa2a4095"
+  },
+  {
+   "file": "gemma3-1b-fa.gguf.part03",
+   "size": 95000000,
+   "sha256": "44689b42be441c0c295cd75a5e7da8421b71461f95f71c6e9fb8d6b0e8c66bf1"
+  },
+  {
+   "file": "gemma3-1b-fa.gguf.part04",
+   "size": 95000000,
+   "sha256": "79aec449224598067980264dee89232ae2ff600d96e0f7bd56fb992301506968"
+  },
+  {
+   "file": "gemma3-1b-fa.gguf.part05",
+   "size": 95000000,
+   "sha256": "0d57b84980c7ae99f453212ed478d1c6d6615aa0472be21a72f3d4df0c0b1642"
+  },
+  {
+   "file": "gemma3-1b-fa.gguf.part06",
+   "size": 37179296,
+   "sha256": "5304c75a90ce5c1df2e4d8ec65394a67ccf29462dc7cfb4a936702ff178a43fd"
+  }
+ ],
+ "license": "Gemma Terms of Use \u2014 https://ai.google.dev/gemma/terms",
+ "runtime": [
+  {
+   "file": "wllama.min.js",
+   "size": 331530
+  },
+  {
+   "file": "compat/wllama.js",
+   "size": 171615
+  },
+  {
+   "file": "compat/wllama.wasm",
+   "size": 16005007
+  }
+ ],
+ "runtimeName": "wllama 3.8.1 (llama.cpp b11364, asyncify wasm32 build) \u2014 MIT",
+ "total": 623687448
+}
