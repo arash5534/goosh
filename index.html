@@ -35,24 +35,31 @@ html,body{margin:0;background:#0b0b0c;color:#f2f2f2;font-family:-apple-system,"S
   <h1>گوش مصنوعی</h1>
   <p>برنامه رمزگذاری شده است. برای باز کردن، رمز صاحب برنامه را وارد کنید.</p>
   <input type="text" name="username" value="goosh" autocomplete="username" style="display:none" readonly>
-  <input type="password" id="gl-pw" autocomplete="current-password" placeholder="رمز" required>
+  <input type="password" id="gl-pw" autocomplete="current-password" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" placeholder="رمز" required>
   <label><input type="checkbox" id="gl-rem" checked> روی این دستگاه به خاطر بسپار</label>
   <button id="gl-btn" type="submit">باز کردن</button>
   <div class="err" id="gl-err"></div>
-  <div class="ver">v1.9.0 (goosh-v16)</div>
+  <div class="ver">v1.9.1 (goosh-v17)</div>
 </form></div>
 <script>
 // Owner lock: the app's code (HTML, CSS, JS) is published only as AES-256-GCM ciphertext (app.enc).
 // The key is derived on the device from the owner's password with PBKDF2-SHA256; nothing secret is stored on the server.
 // "Remember" keeps the derived key as a NON-extractable CryptoKey in this browser's IndexedDB (the password itself is never stored).
 (function () {
-  var ENC = 'app.enc?v=1.9.0', $ = function (id) { return document.getElementById(id); };
+  var ENC = 'app.enc?v=1.9.1', $ = function (id) { return document.getElementById(id); };
   function idb(mode, fn) { return new Promise(function (res, rej) { var r = indexedDB.open('goosh-lock', 1); r.onupgradeneeded = function () { r.result.createObjectStore('k'); };
     r.onsuccess = function () { var t = r.result.transaction('k', mode), q = fn(t.objectStore('k')); t.oncomplete = function () { res(q && q.result); }; t.onerror = function () { rej(t.error); }; }; r.onerror = function () { rej(r.error); }; }); }
   var encP = null;
   function getEnc() { return encP || (encP = fetch(ENC, { cache: 'no-cache' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.arrayBuffer(); }).then(function (b) {
     var u = new Uint8Array(b), magic = String.fromCharCode.apply(null, u.subarray(0, 6)); if (magic !== 'GOOSH1') throw new Error('bad file');
     var dv = new DataView(b); return { salt: u.slice(6, 22), iter: dv.getUint32(22), iv: u.slice(26, 38), ct: u.slice(38) }; }).catch(function (e) { encP = null; throw e; })); }
+  // iOS may auto-capitalize / swap digits or dashes: the password is lowercase ASCII, so normalize before deriving.
+  function normPw(pw) { var s = String(pw || ''); try { s = s.normalize('NFKC'); } catch (e) { }
+    s = s.toLowerCase().replace(/[\u06f0-\u06f9]/g, function (c) { return String(c.charCodeAt(0) - 0x06f0); })
+      .replace(/[\u0660-\u0669]/g, function (c) { return String(c.charCodeAt(0) - 0x0660); })
+      .replace(/[\u2010-\u2015\u2212\u2043\ufe58\ufe63\uff0d\u058a\u05be\u1806\u2e3a\u2e3b]/g, '-');
+    var m = s.match(/[a-z0-9]{4}(?:-[a-z0-9]{4}){3}/);   // pasted chat text, quotes, backticks, RTL marks, zero-width chars around it
+    return m ? m[0] : s.replace(/[^a-z0-9-]/g, ''); }
   function derive(pw, e) { return crypto.subtle.importKey('raw', new TextEncoder().encode(pw), 'PBKDF2', false, ['deriveKey']).then(function (base) {
     return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: e.salt, iterations: e.iter, hash: 'SHA-256' }, base, { name: 'AES-GCM', length: 256 }, false, ['decrypt']); }); }
   function run(key, e, onOk) { return crypto.subtle.decrypt({ name: 'AES-GCM', iv: e.iv }, key, e.ct).then(function (plain) {
@@ -73,7 +80,7 @@ html,body{margin:0;background:#0b0b0c;color:#f2f2f2;font-family:-apple-system,"S
     return run(a[0], a[1]).catch(function () { idb('readwrite', function (s) { return s.delete('key'); }).catch(function () { }); show(); });
   }).catch(function (e) { show(); fail('فایل برنامه دریافت نشد (' + (e && e.message) + '). اینترنت را بررسی کنید.'); });
   $('gl-form').addEventListener('submit', function (ev) {
-    ev.preventDefault(); var pw = $('gl-pw').value; if (!pw) return;
+    ev.preventDefault(); var pw = normPw($('gl-pw').value); if (!pw) return;
     $('gl-btn').disabled = true; $('gl-pw').disabled = true; $('gl-err').textContent = 'در حال باز کردن…';
     getEnc().then(function (e) { return derive(pw.trim(), e).then(function (key) {
       return run(key, e, function () { return $('gl-rem').checked ? idb('readwrite', function (s) { return s.put(key, 'key'); }).catch(function () { }) : null; }); }); })

@@ -3,8 +3,8 @@
 //   other static files are cache-first (refreshed in the background). Offline: everything falls back to the cache.
 // - On activate it deletes every older cache and, when it is replacing an older build, reloads open windows
 //   (so a page still running an old build switches to the new one without the user doing anything).
-const VERSION = 'goosh-v16';
-const FILES = ['./', 'index.html', 'app.enc?v=1.9.0', 'vendor/fonts/Cairo.ttf', 'vendor/seflash/logo.png', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'vendor/ort.wasm.min.js', 'vendor/piper-phonemize.js', 'vendor/tesseract.min.js',
+const VERSION = 'goosh-v17';
+const FILES = ['./', 'index.html', 'app.enc?v=1.9.1', 'vendor/fonts/Cairo.ttf', 'vendor/seflash/logo.png', 'manifest.webmanifest', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs', 'vendor/ort.wasm.min.js', 'vendor/piper-phonemize.js', 'vendor/tesseract.min.js',
   'icons/icon.svg', 'icons/goosh-180.png', 'icons/goosh-192.png', 'icons/goosh-512.png', 'icons/goosh-maskable-512.png',
   'icons/apple-touch-icon.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => e.waitUntil(caches.open(VERSION).then(c => c.addAll(FILES.map(f => new Request(f, { cache: 'reload' })))).then(() => self.skipWaiting())));
